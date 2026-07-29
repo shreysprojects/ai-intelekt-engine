@@ -221,6 +221,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_file(self, file: Path, mime: str):
+        """Serve a local file with HTTP Range support (needed for <video> seek)."""
+        size = file.stat().st_size
+        rng = self.headers.get("Range", "")
+        start, end = 0, size - 1
+        partial = False
+        if rng.startswith("bytes="):
+            partial = True
+            first, _, last = rng[len("bytes="):].partition("-")
+            try:
+                start = int(first) if first else 0
+                end = int(last) if last else size - 1
+            except ValueError:
+                start, end = 0, size - 1
+            start, end = max(0, start), min(end, size - 1)
+            if start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return None
+        length = end - start + 1
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with open(file, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+        return None
+
     def _read_body_raw(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_UPLOAD_BYTES * 2:
@@ -286,6 +325,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(content)
                 return None
 
+            if path.startswith("/api/video/two-shot/"):
+                job_id = path.split("/api/video/two-shot/", 1)[1]
+                job = store.get_job(job_id)
+                ts = (job or {}).get("twoShot") or {}
+                fpath = Path(ts.get("path") or "")
+                if not job or ts.get("status") != "ready" or not fpath.is_file():
+                    return self._json(404, {"error": "Two-shot not available for this job."})
+                return self._serve_file(fpath, "video/mp4")
+
             # static files
             rel = "index.html" if path == "/" else path.lstrip("/")
             file = (PUBLIC_DIR / rel).resolve()
@@ -339,6 +387,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/video/generate":
                 result = video.generate(body.get("approvalId", ""), body)
+                return self._json(400 if result.get("errors") else 200, result)
+
+            if path == "/api/video/two-shot-rebuild":
+                result = video.rebuild_two_shot(body.get("jobId", ""))
                 return self._json(400 if result.get("errors") else 200, result)
 
             if path == "/api/video/cancel":

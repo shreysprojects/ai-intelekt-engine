@@ -265,15 +265,24 @@ class HeyGenProvider(VideoProvider):
             body["type"] = "image"
             body["image"] = {"type": "base64", "media_type": mime,
                              "data": base64.b64encode(content).decode("ascii")}
-            body["engine"] = {"type": "avatar_iv"}
+            # image mode is Avatar IV implicitly; an explicit "engine" field is
+            # only valid in avatar mode and gets a strict-validation 400 here
             body["expressiveness"] = request.get("expressiveness") or "medium"
         elif request.get("avatarId"):
             body["type"] = "avatar"
             body["avatar_id"] = request["avatarId"]
+            # Photo-avatar-only extras (idle "listening" clips use these to keep
+            # hands still). Only sent alongside motionPrompt so plain talk clips
+            # keep the historical payload — digital twins reject both fields.
+            if request.get("motionPrompt"):
+                body["expressiveness"] = request.get("expressiveness") or "low"
         elif request.get("referenceAssetId"):
             raise ProviderError("missing_reference", "The persona's reference image file could not be read.")
         else:
             raise ProviderError("missing_reference", "No provider avatar or reference image configured for this persona.")
+
+        if request.get("motionPrompt"):
+            body["motion_prompt"] = request["motionPrompt"]
 
         headers = self._headers()
         if request.get("jobId"):

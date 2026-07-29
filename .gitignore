@@ -7,6 +7,9 @@ data/
 # Generated content runs (local audit log)
 runs/
 
+# Bundled ffmpeg/ffprobe binaries (large; install locally)
+tools/ffmpeg/
+
 # Python
 __pycache__/
 *.pyc

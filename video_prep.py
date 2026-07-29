@@ -311,6 +311,10 @@ def build_provider_request(approval: dict, job_id: str, settings: dict) -> dict:
                 "referenceAssetId": cfg.get("referenceAssetId"),
                 "voiceId": cfg.get("voiceId"),
             })
+    # Podcast segments are single-speaker clips that get composited into one
+    # 16:9 two-shot, so each host is generated square (1:1) to frame well in its
+    # half of the frame. The composed two-shot is always 16:9.
+    aspect = "1:1" if segments else (s.get("aspectRatio") or settings.get("defaultAspectRatio", "16:9"))
     return {
         "segments": segments,
         "scriptId": approval["scriptId"],
@@ -322,7 +326,7 @@ def build_provider_request(approval: dict, job_id: str, settings: dict) -> dict:
         "referenceAssetId": None if segments else persona_cfg.get("referenceAssetId"),
         "avatarId": None if segments else persona_cfg.get("providerAvatarId"),
         "voiceId": None if segments else persona_cfg.get("voiceId"),
-        "aspectRatio": s.get("aspectRatio") or settings.get("defaultAspectRatio", "16:9"),
+        "aspectRatio": aspect,
         "resolution": s.get("resolution") or settings.get("defaultResolution", "1080p"),
         "visualStyle": "executive-podcast",
         "expressiveness": settings.get("expressiveness", "medium"),

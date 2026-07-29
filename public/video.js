@@ -267,7 +267,26 @@ function jobActions(j) {
   }
   if (j.status === 'failed') acts.push(`<button class="vbtn small" onclick="retryJob('${j.id}')">Retry</button>`);
   if (j.status === 'queued' || j.status === 'processing') acts.push(`<button class="vbtn small" onclick="cancelJob('${j.id}')">Cancel</button>`);
+  const ts = j.twoShot;
+  if (ts) {
+    if (ts.status === 'processing') acts.push('<span class="vbtn small" style="opacity:.7" title="Building the same-room two-shot">Two-shot building…</span>');
+    else if (ts.status === 'ready') {
+      acts.push(`<button class="vbtn small" onclick="previewTwoShot('${j.id}')">Two-shot ▶</button>`);
+      acts.push(`<a class="vbtn small" href="${esc(ts.url)}" download target="_blank" rel="noopener">Two-shot ⬇</a>`);
+    } else if (ts.status === 'failed') acts.push(`<span class="vbtn small" style="opacity:.7" title="${esc(ts.error || '')}">Two-shot failed</span>`);
+  }
   return acts.join(' ');
+}
+
+function previewTwoShot(jobId) {
+  const j = vState.jobs.find((x) => x.id === jobId);
+  const ts = j.twoShot || {};
+  V('vPreviewBody').innerHTML = `
+    <div class="vmeta" style="margin-bottom:6px">Same-room two-shot — both hosts in one frame</div>
+    <video src="${esc(ts.url)}" controls autoplay style="width:100%" preload="metadata"></video>
+    <div class="vmeta">${esc(j.title)} · 16:9 · ${ts.durationSeconds ? ts.durationSeconds + 's' : ''}
+      <a class="vbtn small" href="${esc(ts.url)}" download target="_blank" rel="noopener">Download</a></div>`;
+  V('vPreviewDlg').showModal();
 }
 
 async function cancelJob(jobId) {

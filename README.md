@@ -35,9 +35,49 @@ directions. The product script (Pipeline A) stays in the neutral product voice
 For video, each host's consecutive turns become one clip generated with that
 host's avatar and voice (HeyGen v3 renders one avatar per video); the clips
 are tracked as ordered segments of a single job and downloaded for the podcast
-edit (two-shot stitching happens in the edit). Older single-voice runs keep
-working unchanged. A hand-written `runs/2026-07-16_demo-podcast` run
-demonstrates the format — delete it once a real run exists.
+edit. Older single-voice runs keep working unchanged. A hand-written
+`runs/2026-07-16_demo-podcast` run demonstrates the format — delete it once a
+real run exists.
+
+### Same-room two-shot (automatic)
+HeyGen has no API that renders two avatars in one frame, so the engine builds
+it locally. When a dialogue job completes, `twoshot.py` composites the
+per-speaker clips into a single 16:9 "same room" video: each host is fixed to
+one half of the frame, the halves are joined with a feathered seam so the desk
+and back wall read as one continuous studio, and whoever is not speaking runs a
+muted "listening" loop instead of freezing. The result is exposed on the job as
+`twoShot` (status `processing`/`ready`/`failed`) and served at
+`/api/video/two-shot/<jobId>`; the Video queue shows **Two-shot ▶ / ⬇**
+buttons. Requirements and notes:
+- Dialogue segments are generated **square (1:1)** so each host frames well in
+  their half; the composed two-shot is always 16:9.
+- Each host needs a `providerAvatarId` (a studio-look avatar) in Video
+  settings. Reference-photo personas also work but frame less predictably.
+- A muted idle "listening" clip is generated once per avatar and cached under
+  `data/videos/_idle_cache/`, so only the first run pays for it (~$0.30/host).
+  Idle clips are requested with a motion prompt (`twoshot.IDLE_MOTION_PROMPT`),
+  but prompts alone don't guarantee stillness — so at render time the stitcher
+  finds the clip's stillest window by frame-difference analysis, stretches it
+  to ~3x slow motion, and ping-pongs it (random phase per turn). If the clip is
+  never actually still (best window above `twoshot.STILL_THRESH`), the listener
+  becomes a fully static frozen frame instead, chosen for closed lips (an open
+  mouth reads dark in the mouth region). Intermediate renders are lossless so
+  the frozen half can't shimmer with encoder noise; only the final export is
+  lossy. Bump `twoshot.IDLE_VERSION` after changing the idle script/prompt.
+- The two halves are auto color-matched per job: a desk-wood patch near the
+  seam is sampled on each side and per-channel gains meet them in the middle,
+  so one side never renders brighter/warmer than the other.
+- Turn boundaries are crossfaded (`twoshot.XFADE`) and each speaker clip is
+  trimmed to speech (silence detection, `HEAD_PAD`/`TAIL_PAD`), so cuts don't
+  stack two clips' dead air into a pause.
+- `POST /api/video/two-shot-rebuild {jobId}` re-runs just the stitch for a
+  completed job (e.g. after retuning `twoshot.ALIGN`) without re-buying clips.
+- The desk line meets cleanly at the seam only if the two studio looks share
+  camera geometry. `twoshot.ALIGN` holds small per-side zoom/shift trims
+  calibrated to the current looks — retune it if the persona looks change
+  (compare desk height at the seam of `data/videos/<job>/two_shot.mp4`).
+- Needs `ffmpeg`/`ffprobe`: bundled in `tools/ffmpeg/`, or set `FFMPEG_BIN` to
+  their folder, or put them on `PATH`.
 
 ## Video workflow
 1. **Video Production** shows both scripts from the selected run: narration,
