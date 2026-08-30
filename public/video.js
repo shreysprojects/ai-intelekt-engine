@@ -4,6 +4,26 @@ const V = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'idem-' + Date.now() + '-' + Math.random());
 
+/* Human-readable dates. fmtDate: ISO timestamp → local "Jul 16, 2026 · 12:39 PM".
+   runLabel: run id "2026-07-11_1025" → "Jul 11, 2026 · 10:25 AM" (non-time
+   suffixes like "demo-podcast" are kept as-is; unparseable ids pass through). */
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) +
+    ' · ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+function runLabel(id) {
+  const m = /^(\d{4}-\d{2}-\d{2})_(.*)$/.exec(String(id));
+  if (!m) return String(id);
+  const t = /^(\d{2})(\d{2})$/.exec(m[2]);
+  const d = new Date(m[1] + 'T' + (t ? t[1] + ':' + t[2] : '12:00') + ':00');
+  const day = isNaN(d) ? m[1] : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  if (t) return day + ' · ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return day + ' · ' + m[2];
+}
+
 let vState = null;          // /api/video/state
 let currentRun = null;      // /api/run/{id}
 let reviewCtx = null;       // {runId, scriptKey, approval, estimatedCost}
@@ -71,10 +91,28 @@ async function loadRuns() {
   const { runs } = await api('/api/runs');
   const sel = V('vRunSelect');
   sel.innerHTML = runs.length
-    ? runs.map((r) => `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join('')
+    ? runs.map((r) => `<option value="${esc(r.id)}">${esc(runLabel(r.id))}</option>`).join('')
     : '<option value="">No content runs yet — run the pipeline first</option>';
   if (runs.length) await selectRun(runs[0].id);
-  else V('vScripts').innerHTML = '<div class="vempty">No content runs yet. Run today\'s pipeline in the <b>1 · Create</b> tab, then approve a script here.</div>';
+  else {
+    currentRun = null;
+    V('vScripts').innerHTML = '<div class="vempty">No content runs yet. Run today\'s pipeline in the <b>1 · Create</b> tab, then approve a script here.</div>';
+  }
+}
+
+async function deleteCurrentRun() {
+  if (!currentRun) return;
+  const apvIds = new Set((vState ? vState.approvals : [])
+    .filter((a) => a.contentRunId === currentRun.id).map((a) => a.id));
+  const nJobs = (vState ? vState.jobs : []).filter((j) => apvIds.has(j.approvalId)).length;
+  const extra = nJobs ? ` and its ${nJobs} video job${nJobs === 1 ? '' : 's'} (downloaded video files included)` : '';
+  if (!confirm(`Delete the content run from ${runLabel(currentRun.id)}${extra}?\nThis cannot be undone.`)) return;
+  try {
+    await api('/api/run/delete', { runId: currentRun.id });
+    currentRun = null;
+    await loadVideoState();
+    await loadRuns();
+  } catch (e) { alert(e.message); }
 }
 
 async function selectRun(runId) {
@@ -117,6 +155,7 @@ function scriptCard(key, s) {
       </div>
       <span class="chip chip-${status}">${esc(STATUS_LABEL[status] || status)}</span>
     </div>
+    ${s.freshnessFlag ? `<div class="vflag" role="alert">⚠ ${esc(s.freshnessFlag)}</div>` : ''}
     ${gateOk ? '' : `<div class="vgate" role="alert"><b>Validation gate — approval blocked:</b><ul>${s.gateProblems.map((g) => `<li>${esc(g)}</li>`).join('')}</ul></div>`}
     ${latestJob ? `<div class="vmeta">Latest video job: ${esc(STATUS_LABEL[latestJob.status] || latestJob.status)} (attempt ${latestJob.attemptNumber}, ${esc(latestJob.provider)})</div>` : ''}
     <details><summary>Spoken narration (${s.narrationPreview.split(/\s+/).length} words)</summary><pre>${esc(s.narrationPreview)}</pre></details>
@@ -179,7 +218,7 @@ function renderReview() {
   };
   V('vReviewBody').innerHTML = `
     ${providerInfo.isMock ? '<div class="vmock">MOCK VIDEO PROVIDER — no credits will be used and no real video is produced.</div>' : ''}
-    ${isDialogue ? '<div class="vmeta">🎙 Two-host podcast: each host\'s turns are generated as separate clips with that host\'s avatar and voice, delivered in order for the podcast edit.</div>' : ''}
+    ${isDialogue ? '<div class="vmeta">🎙 Two-host podcast: HeyGen renders the whole episode as ONE video — one scene per speaking turn, each with that host\'s avatar and voice. Both hosts need a real avatar ID (photos don\'t work for podcast scenes).</div>' : ''}
     <div class="vgrid">
       <div><span class="vlabel">Speaker / persona</span><b>${isDialogue ? 'Ravi &amp; Rik (podcast)' : esc(a.persona)}</b>${isDialogue ? '' : ' (' + esc(a.approvedScriptSnapshot.voice || 'product') + ')'}</div>
       <div><span class="vlabel">Provider</span>${esc(providerInfo.displayName || vState.settings.provider)} — ${esc(providerInfo.detail || '')}</div>
@@ -246,7 +285,7 @@ function renderQueue() {
     (!f.pipeline || j.pipeline === f.pipeline) && (!f.provider || j.provider === f.provider));
   V('vQueueBody').innerHTML = jobs.length ? jobs.map((j) => `
     <tr>
-      <td>${esc(j.title)}<div class="vmeta">${esc(j.createdAt || '').replace('T', ' ').slice(0, 16)}</div></td>
+      <td>${esc(j.title)}<div class="vmeta">${esc(fmtDate(j.createdAt))}</div></td>
       <td>${j.persona === 'Dialogue' ? 'Ravi &amp; Rik 🎙' : esc(j.persona)}</td><td>${esc(j.pipeline || '—')}</td>
       <td>${esc(j.provider)}${j.isMock ? ' <span class="vmocktag">MOCK</span>' : ''}</td>
       <td>#${j.attemptNumber}</td><td>${esc(j.aspectRatio)}</td>
@@ -267,26 +306,15 @@ function jobActions(j) {
   }
   if (j.status === 'failed') acts.push(`<button class="vbtn small" onclick="retryJob('${j.id}')">Retry</button>`);
   if (j.status === 'queued' || j.status === 'processing') acts.push(`<button class="vbtn small" onclick="cancelJob('${j.id}')">Cancel</button>`);
-  const ts = j.twoShot;
-  if (ts) {
-    if (ts.status === 'processing') acts.push('<span class="vbtn small" style="opacity:.7" title="Building the same-room two-shot">Two-shot building…</span>');
-    else if (ts.status === 'ready') {
-      acts.push(`<button class="vbtn small" onclick="previewTwoShot('${j.id}')">Two-shot ▶</button>`);
-      acts.push(`<a class="vbtn small" href="${esc(ts.url)}" download target="_blank" rel="noopener">Two-shot ⬇</a>`);
-    } else if (ts.status === 'failed') acts.push(`<span class="vbtn small" style="opacity:.7" title="${esc(ts.error || '')}">Two-shot failed</span>`);
-  }
+  else acts.push(`<button class="vbtn small" onclick="deleteJob('${j.id}')" title="Delete this video and its files">🗑</button>`);
   return acts.join(' ');
 }
 
-function previewTwoShot(jobId) {
-  const j = vState.jobs.find((x) => x.id === jobId);
-  const ts = j.twoShot || {};
-  V('vPreviewBody').innerHTML = `
-    <div class="vmeta" style="margin-bottom:6px">Same-room two-shot — both hosts in one frame</div>
-    <video src="${esc(ts.url)}" controls autoplay style="width:100%" preload="metadata"></video>
-    <div class="vmeta">${esc(j.title)} · 16:9 · ${ts.durationSeconds ? ts.durationSeconds + 's' : ''}
-      <a class="vbtn small" href="${esc(ts.url)}" download target="_blank" rel="noopener">Download</a></div>`;
-  V('vPreviewDlg').showModal();
+async function deleteJob(jobId) {
+  const j = vState.jobs.find((x) => x.id === jobId) || {};
+  if (!confirm(`Delete "${j.title || 'this video'}" (attempt #${j.attemptNumber || '?'})?\nIts downloaded video files are removed too. This cannot be undone.`)) return;
+  try { await api('/api/video/job/delete', { jobId }); } catch (e) { alert(e.message); }
+  await loadVideoState();
 }
 
 async function cancelJob(jobId) {
@@ -345,7 +373,7 @@ async function openJob(jobId) {
       <div><span class="vlabel">Approved by</span>${esc(a.approvedBy || '—')} at ${esc(a.approvedAt || '—')}</div>
     </div>
     ${j.errorMessage ? `<div class="vgate" role="alert">${esc(j.errorCode)}: ${esc(j.errorMessage)}</div>` : ''}
-    ${j.segments && j.segments.length ? `<details open><summary>Podcast segments (${j.segments.length} clips, stitch in order)</summary>
+    ${j.segments && j.segments.length ? `<details open><summary>Podcast segments (${j.segments.length} clips — legacy per-speaker job)</summary>
       <div class="tscroll"><table><thead><tr><th>#</th><th>Host</th><th>Status</th><th>Clip</th></tr></thead><tbody>
       ${j.segments.map((s) => `<tr><td>${s.index + 1}</td><td>${esc(s.speaker)}</td><td><span class="chip chip-${s.status}">${esc(STATUS_LABEL[s.status] || s.status)}</span>${s.errorMessage ? `<div class="verr">${esc(s.errorMessage)}</div>` : ''}</td><td>${s.videoUrl ? `<a class="vbtn small" href="${esc(s.videoUrl)}" download target="_blank" rel="noopener">Download</a>` : '—'}</td></tr>`).join('')}
       </tbody></table></div></details>` : ''}
@@ -500,6 +528,7 @@ async function saveProviderKey(prov, key) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   V('vRunSelect').addEventListener('change', (e) => selectRun(e.target.value));
+  V('vRunDelete').addEventListener('click', deleteCurrentRun);
   V('vGenerateBtn').addEventListener('click', generateFromReview);
   V('vsSave').addEventListener('click', saveSettings);
   // Any edit inside the settings card marks the form dirty so background

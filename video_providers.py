@@ -193,7 +193,8 @@ class HeyGenProvider(VideoProvider):
     supported_aspects = ("16:9", "9:16", "1:1")
     supports_reference_image = True   # v3 "image" mode generates from a still image
     supports_cancel = False           # no cancel endpoint in the official v3 reference
-    supports_dialogue = True          # podcast = one clip per speaker segment (v3 is single-avatar per video)
+    supports_dialogue = True          # podcast = ONE "studio" video with an avatar_video scene per turn
+    dialogue_requires_avatar_id = True  # studio scenes take avatar_id only — reference photos are single-speaker
     key_env_vars = ("HEYGEN_API_KEY", "VIDEO_PROVIDER_API_KEY")
 
     def check_key(self, key: str):
@@ -284,10 +285,13 @@ class HeyGenProvider(VideoProvider):
         if request.get("motionPrompt"):
             body["motion_prompt"] = request["motionPrompt"]
 
+        return self._submit(request, body)
+
+    def _submit(self, request: dict, body: dict) -> dict:
+        """POST /v3/videos with idempotency + friendly error mapping."""
         headers = self._headers()
         if request.get("jobId"):
             headers["Idempotency-Key"] = request["jobId"][:255]
-
         try:
             resp = _http_json("POST", f"{self.base}/v3/videos", headers, body)
         except ProviderError as e:
@@ -307,32 +311,40 @@ class HeyGenProvider(VideoProvider):
                        estimated_cost=self.getEstimatedCost(request))
 
     def _create_dialogue(self, request: dict) -> dict:
-        """Two-host podcast: HeyGen v3 renders one avatar per video, so each
-        consecutive speaker block is submitted as its own clip. The clips are
-        tracked as segments of a single job and downloaded in order for the
-        podcast edit (two-shot stitching happens in the edit, not the API)."""
-        segments_out = []
+        """Two-host podcast in ONE take: a v3 "studio" video concatenates
+        whole-frame scenes, so each speaker turn becomes an avatar_video scene
+        (that host's avatar + voice) and HeyGen renders the full episode as a
+        single video — one job, one video_id, no local stitching.
+        Source: developers.heygen.com/reference/create-video.md
+        (CreateVideoFromStudio, consulted 2026-08-03). Scenes accept avatar_id
+        only, so podcast hosts need trained/studio avatars, not photos."""
+        scenes = []
         for seg in request["segments"]:
-            sub = dict(request)
-            sub.update({
-                "segments": None,
-                "spokenScript": seg["text"],
-                "voiceId": seg["voiceId"],
-                "avatarId": seg.get("avatarId"),
-                "referenceAssetId": seg.get("referenceAssetId"),
-                "title": f"{request.get('title') or 'Podcast'} — part {seg['index'] + 1} ({seg['speaker']})",
-                "jobId": f"{request.get('jobId', 'job')}-s{seg['index']}",
-                "estimatedSeconds": max(4, round(len(seg['text'].split()) / 2.5)),
-            })
-            r = self.createVideo(sub)
-            segments_out.append({"index": seg["index"], "speaker": seg["speaker"],
-                                 "providerJobId": r["providerJobId"], "status": r["status"],
-                                 "videoUrl": "", "thumbnailUrl": "", "durationSeconds": None,
-                                 "errorMessage": ""})
-        result = _result(provider_job_id=segments_out[0]["providerJobId"], status="queued",
-                         estimated_cost=self.getEstimatedCost(request))
-        result["segments"] = segments_out
-        return result
+            if not seg.get("avatarId"):
+                raise ProviderError(
+                    "missing_avatar",
+                    f"Host '{seg['speaker']}' has no HeyGen avatar ID. Podcast scenes need a real "
+                    "avatar ID per host (reference photos only work for single-speaker videos) — set it in Settings.")
+            scenes.append({"type": "avatar_video",
+                           "input": {"type": "avatar",
+                                     "avatar_id": seg["avatarId"],
+                                     "script": seg["text"],
+                                     "voice_id": seg["voiceId"],
+                                     "expressiveness": request.get("expressiveness") or "medium"}})
+        body: dict = {
+            "type": "studio",
+            "title": request.get("title") or "ai-InteleKt podcast",
+            "aspect_ratio": request.get("aspectRatio") or "16:9",
+            "resolution": request.get("resolution") or "1080p",
+            "scenes": scenes,
+            "callback_id": request.get("jobId", ""),
+        }
+        if request.get("captions", {}).get("enabled", True):
+            body["caption"] = {"file_format": "srt"}
+        public_webhook = os.environ.get("VIDEO_WEBHOOK_PUBLIC_URL", "").strip()
+        if public_webhook:
+            body["callback_url"] = public_webhook.rstrip("/") + "/api/video/webhook/heygen"
+        return self._submit(request, body)
 
     def list_voices(self) -> list:
         """GET /v3/voices (official reference) — private/cloned voices first."""
@@ -367,9 +379,12 @@ class HeyGenProvider(VideoProvider):
 
     def getEstimatedCost(self, request: dict):
         seconds = request.get("estimatedSeconds") or 60
-        # A reference photo (image mode) takes priority over an avatar ID.
-        use_avatar = bool(request.get("avatarId")) and not request.get("referenceAssetId")
-        rate = self.TWIN_RATE_PER_SEC if use_avatar else self.PHOTO_RATE_PER_SEC
+        if request.get("segments"):
+            rate = self.TWIN_RATE_PER_SEC  # studio scenes always use trained avatars
+        else:
+            # A reference photo (image mode) takes priority over an avatar ID.
+            use_avatar = bool(request.get("avatarId")) and not request.get("referenceAssetId")
+            rate = self.TWIN_RATE_PER_SEC if use_avatar else self.PHOTO_RATE_PER_SEC
         return round(seconds * rate, 2)
 
     def normalizeWebhook(self, headers: dict, raw_body: bytes) -> dict:

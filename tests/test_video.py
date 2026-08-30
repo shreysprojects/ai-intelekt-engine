@@ -441,6 +441,119 @@ class VideoWorkflowTest(unittest.TestCase):
         r = self.generate(a["id"])  # mock
         self.assertNotIn("errors", r, r.get("errors"))
 
+    # -------- scout freshness flag --------
+    def test_freshness_flag_prefers_model_note(self):
+        out = json.dumps({"pipeline": "A", "date": "2026-08-03",
+                          "freshness_note": "No 48-hour primary news found; freshest coverage is from July.",
+                          "candidates": [{"published": "2026-08-03", "confidence": "HIGH"}]})
+        self.assertIn("No 48-hour primary news", pipeline.freshness_flag(out))
+
+    def test_freshness_flag_stale_dates_heuristic(self):
+        # mirrors the 2026-08-03 real run: no note field, HIGH pick dated July 1
+        out = json.dumps({"pipeline": "A", "date": "2026-08-03", "candidates": [
+            {"published": "2026-07-01", "confidence": "HIGH"},
+            {"published": "2026-07-27", "confidence": "MEDIUM"}]})
+        flag = pipeline.freshness_flag(out)
+        self.assertIn("last 48 hours", flag)
+        self.assertIn("Jul 27, 2026", flag)
+
+    def test_freshness_flag_no_high_confidence(self):
+        out = json.dumps({"pipeline": "A", "date": "2026-08-03", "candidates": [
+            {"published": "2026-08-02", "confidence": "MEDIUM"}]})
+        self.assertIn("HIGH-confidence", pipeline.freshness_flag(out))
+
+    def test_freshness_flag_fresh_run_not_flagged(self):
+        out = json.dumps({"pipeline": "A", "date": "2026-08-03", "freshness_note": "",
+                          "candidates": [{"published": "2026-08-02", "confidence": "HIGH"}]})
+        self.assertIsNone(pipeline.freshness_flag(out))
+        self.assertIsNone(pipeline.freshness_flag(""))
+        self.assertIsNone(pipeline.freshness_flag("not json at all"))
+
+    def test_get_run_exposes_freshness_flag(self):
+        p = self.runs / self.run_id / "stages.json"
+        stages = json.loads(p.read_text(encoding="utf-8"))
+        stages["scoutA"] = json.dumps({"pipeline": "A", "date": "2026-08-03",
+                                       "freshness_note": "Search found only evergreen roundups.",
+                                       "candidates": [{"published": "2026-07-01", "confidence": "MEDIUM"}]})
+        p.write_text(json.dumps(stages), encoding="utf-8")
+        run = self.svc.get_run(self.run_id)
+        self.assertIn("evergreen roundups", run["scripts"]["scriptA"]["freshnessFlag"])
+        self.assertIsNone(run["scripts"]["scriptB"]["freshnessFlag"])  # no scoutB stage saved
+
+    # -------- rejection survives job bookkeeping --------
+    def test_reject_sticks_on_past_generations(self):
+        """Rejecting a script whose approval already has completed/failed jobs
+        must stick — _sync_approval_status used to overwrite it."""
+        a = self.approve_a()
+        self.generate(a["id"])
+        self.clock.advance(30)
+        self.svc.poll_active_jobs()  # job completes → approval "completed"
+        self.assertEqual(self.store.get_approval(a["id"])["status"], "completed")
+        r = self.svc.reject(self.run_id, "scriptA", note="tone is off")
+        self.assertEqual(r["approval"]["status"], "rejected")
+        self.svc._sync_approval_status(a["id"])  # what polling/webhooks call
+        self.assertEqual(self.store.get_approval(a["id"])["status"], "rejected")
+        # re-approving is the only way out
+        self.assertEqual(self.approve_a()["status"], "approved")
+
+    # -------- deletion --------
+    def test_delete_job(self):
+        a = self.approve_a()
+        job = self.generate(a["id"])["job"]
+        self.clock.advance(30)
+        self.svc.poll_active_jobs()
+        r = self.svc.delete_job(job["id"])
+        self.assertNotIn("errors", r, r.get("errors"))
+        self.assertIsNone(self.store.get_job(job["id"]))
+        self.assertEqual(self.store.list_events(job["id"]), [])
+        # with no attempts left the approval falls back to "approved"
+        self.assertEqual(self.store.get_approval(a["id"])["status"], "approved")
+
+    def test_delete_active_job_refused(self):
+        a = self.approve_a()
+        job = self.generate(a["id"])["job"]  # still queued
+        r = self.svc.delete_job(job["id"])
+        self.assertTrue(any("cancel it first" in e.lower() for e in r["errors"]))
+        self.assertIsNotNone(self.store.get_job(job["id"]))
+
+    def test_delete_job_keeps_attempt_numbers_unique(self):
+        a = self.approve_a()
+        j1 = self.generate(a["id"], idem="d1")["job"]
+        self.clock.advance(30)
+        self.svc.poll_active_jobs()
+        j2 = self.generate(a["id"], idem="d2")["job"]
+        self.clock.advance(30)
+        self.svc.poll_active_jobs()
+        self.svc.delete_job(j1["id"])
+        j3 = self.generate(a["id"], idem="d3")["job"]
+        self.assertGreater(j3["attemptNumber"], j2["attemptNumber"])
+
+    def test_delete_run(self):
+        a = self.approve_a()
+        job = self.generate(a["id"])["job"]
+        self.clock.advance(30)
+        self.svc.poll_active_jobs()
+        r = self.svc.delete_run(self.run_id)
+        self.assertNotIn("errors", r, r.get("errors"))
+        self.assertEqual(r["deletedJobs"], 1)
+        self.assertFalse((self.runs / self.run_id).exists())
+        self.assertIsNone(self.store.get_approval(a["id"]))
+        self.assertIsNone(self.store.get_job(job["id"]))
+        self.assertNotIn(self.run_id, [x["id"] for x in self.svc.list_runs()])
+
+    def test_delete_run_with_active_job_refused(self):
+        a = self.approve_a()
+        self.generate(a["id"])  # queued
+        r = self.svc.delete_run(self.run_id)
+        self.assertTrue(any("cancel it first" in e.lower() for e in r["errors"]))
+        self.assertTrue((self.runs / self.run_id).exists())
+
+    def test_delete_run_path_traversal_guard(self):
+        for bad in ("..", "../..", "", "nope", f"..\\{self.run_id}"):
+            r = self.svc.delete_run(bad)
+            self.assertIn("errors", r, f"expected refusal for {bad!r}")
+        self.assertTrue((self.runs / self.run_id).exists())
+
     # -------- podcast dialogue format --------
     def add_dialogue_run(self, mutate=None):
         run_id = "2026-07-16_pod"
@@ -515,6 +628,73 @@ class VideoWorkflowTest(unittest.TestCase):
             TavusProvider().createVideo({"segments": [{"index": 0, "speaker": "Rik", "text": "hi",
                                                        "voiceId": "v", "avatarId": "a"}]})
         self.assertEqual(ctx.exception.code, "dialogue_unsupported")
+
+    # -------- one-take podcast (HeyGen studio video, no stitching) --------
+    def _capture_heygen_submit(self):
+        """Patch the HTTP layer so createVideo captures the body instead of
+        calling HeyGen. Returns (calls, restore_fn)."""
+        import video_providers as vp
+        calls = []
+
+        def fake_http(method, url, headers, body=None, timeout=60):
+            calls.append({"method": method, "url": url, "body": body})
+            return {"data": {"video_id": "vid-studio-1", "status": "waiting"}}
+
+        original = vp._http_json
+        vp._http_json = fake_http
+        return calls, lambda: setattr(vp, "_http_json", original)
+
+    def test_dialogue_heygen_single_studio_video(self):
+        os.environ["HEYGEN_API_KEY"] = "test-key"
+        calls, restore = self._capture_heygen_submit()
+        try:
+            hey = self.providers["heygen"]
+            r = hey.createVideo({
+                "jobId": "job_x", "title": "Podcast test", "aspectRatio": "16:9",
+                "resolution": "1080p", "captions": {"enabled": True},
+                "expressiveness": "medium", "estimatedSeconds": 60,
+                "segments": [
+                    {"index": 0, "speaker": "Rik", "text": "Turn one.", "avatarId": "av-rik", "voiceId": "vo-rik"},
+                    {"index": 1, "speaker": "Ravi", "text": "Turn two.", "avatarId": "av-ravi", "voiceId": "vo-ravi"},
+                ]})
+        finally:
+            restore()
+            del os.environ["HEYGEN_API_KEY"]
+        self.assertEqual(len(calls), 1)  # ONE submission for the whole episode
+        body = calls[0]["body"]
+        self.assertEqual(body["type"], "studio")
+        self.assertEqual(len(body["scenes"]), 2)
+        s0 = body["scenes"][0]
+        self.assertEqual(s0["type"], "avatar_video")
+        self.assertEqual(s0["input"]["avatar_id"], "av-rik")
+        self.assertEqual(s0["input"]["voice_id"], "vo-rik")
+        self.assertEqual(s0["input"]["script"], "Turn one.")
+        self.assertEqual(body["aspect_ratio"], "16:9")
+        self.assertEqual(r["providerJobId"], "vid-studio-1")
+        self.assertNotIn("segments", r)  # one job, no per-clip tracking
+
+    def test_dialogue_heygen_requires_avatar_ids(self):
+        os.environ["HEYGEN_API_KEY"] = "test-key"
+        try:
+            with self.assertRaises(ProviderError) as ctx:
+                self.providers["heygen"].createVideo({
+                    "jobId": "job_y", "captions": {"enabled": False},
+                    "segments": [{"index": 0, "speaker": "Ravi", "text": "hi",
+                                  "avatarId": None, "referenceAssetId": "asset_1", "voiceId": "v"}]})
+            self.assertEqual(ctx.exception.code, "missing_avatar")
+        finally:
+            del os.environ["HEYGEN_API_KEY"]
+
+    def test_dialogue_validation_blocks_photo_only_host_on_heygen(self):
+        approval = {"status": "approved", "persona": "Dialogue", "scriptVersion": "h",
+                    "approvedScriptSnapshot": {"narration": "Rik: hi\n\nRavi: hello", "runtimeSeconds": 10},
+                    "settingsSnapshot": {"aspectRatio": "16:9"}}
+        cfg = {"Rik": {"providerAvatarId": "av-rik", "voiceId": "v1"},
+               "Ravi": {"referenceAssetId": "asset_photo", "voiceId": "v2"}}  # photo only
+        problems = video_prep.validate_for_generation(
+            approval, "h", cfg, self.providers["heygen"], {})
+        self.assertTrue(any("Ravi" in p and "avatar ID" in p for p in problems), problems)
+        self.assertFalse(any("Rik" in p and "avatar ID" in p for p in problems), problems)
 
     def test_single_voice_scripts_still_work(self):
         # Backward compatibility: pre-podcast runs keep the single-speaker flow.

@@ -250,12 +250,16 @@ def validate_for_generation(approval: dict, current_hash: str | None, persona_cf
     if "[VERIFY" in narration or "DO NOT USE" in narration:
         problems.append("Approved narration contains unresolved validation markers.")
 
+    dialogue_needs_avatar = getattr(provider, "dialogue_requires_avatar_id", False)
     if approval.get("persona") == "Dialogue":
         if not getattr(provider, "supports_dialogue", False):
-            problems.append(f"{getattr(provider, 'display_name', 'This provider')} cannot generate a two-host podcast; use a provider with dialogue-segment support.")
+            problems.append(f"{getattr(provider, 'display_name', 'This provider')} cannot generate a two-host podcast; use a provider with dialogue support.")
         for speaker in DIALOGUE_SPEAKERS:
             cfg = (persona_cfg or {}).get(speaker) or {}
-            if not cfg.get("providerAvatarId") and not cfg.get("referenceAssetId"):
+            if dialogue_needs_avatar and not cfg.get("providerAvatarId"):
+                problems.append(f"Host '{speaker}' needs a provider avatar ID for the one-take podcast video — "
+                                "reference photos only work for single-speaker videos (Settings).")
+            elif not cfg.get("providerAvatarId") and not cfg.get("referenceAssetId"):
                 problems.append(f"Host '{speaker}' has no reference image or provider avatar configured (Settings).")
             if not cfg.get("voiceId"):
                 problems.append(f"Host '{speaker}' has no voice configured (Settings).")
@@ -268,9 +272,9 @@ def validate_for_generation(approval: dict, current_hash: str | None, persona_cf
     # A mock placeholder ID must never reach a paid provider — catch it here
     # with a plain instruction instead of letting the provider 404.
     if not getattr(provider, "is_mock", False):
-        def _placeholder_check(label: str, cfg: dict):
+        def _placeholder_check(label: str, cfg: dict, photo_overrides_avatar: bool = True):
             for field, noun in (("providerAvatarId", "avatar"), ("voiceId", "voice")):
-                if field == "providerAvatarId" and cfg.get("referenceAssetId"):
+                if field == "providerAvatarId" and photo_overrides_avatar and cfg.get("referenceAssetId"):
                     continue  # an uploaded photo takes priority, so the avatar ID is never sent
                 val = (cfg.get(field) or "")
                 if val.lower().startswith("mock"):
@@ -280,7 +284,9 @@ def validate_for_generation(approval: dict, current_hash: str | None, persona_cf
                     problems.append(f"{label} {noun} ID '{val}' is a mock-testing placeholder{fix}")
         if approval.get("persona") == "Dialogue":
             for sp in DIALOGUE_SPEAKERS:
-                _placeholder_check(f"Host {sp}", (persona_cfg or {}).get(sp) or {})
+                # dialogue scenes always send the avatar ID, so a photo never overrides it there
+                _placeholder_check(f"Host {sp}", (persona_cfg or {}).get(sp) or {},
+                                   photo_overrides_avatar=not dialogue_needs_avatar)
         else:
             _placeholder_check(f"Persona {approval.get('persona')}", persona_cfg or {})
 
@@ -311,10 +317,7 @@ def build_provider_request(approval: dict, job_id: str, settings: dict) -> dict:
                 "referenceAssetId": cfg.get("referenceAssetId"),
                 "voiceId": cfg.get("voiceId"),
             })
-    # Podcast segments are single-speaker clips that get composited into one
-    # 16:9 two-shot, so each host is generated square (1:1) to frame well in its
-    # half of the frame. The composed two-shot is always 16:9.
-    aspect = "1:1" if segments else (s.get("aspectRatio") or settings.get("defaultAspectRatio", "16:9"))
+    aspect = s.get("aspectRatio") or settings.get("defaultAspectRatio", "16:9")
     return {
         "segments": segments,
         "scriptId": approval["scriptId"],
