@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-InteleKt Content Engine</title>
+<style>
+  :root { --bg:#0e1116; --card:#161b23; --line:#2a3240; --text:#e6e9ee; --dim:#8b95a5; --accent:#4f8cff; --ok:#3ecf8e; --err:#ff6b6b; --warn:#f5b942; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",sans-serif; line-height:1.5; padding:28px 16px 80px; }
+  .wrap { max-width:980px; margin:0 auto; }
+  h1 { font-size:22px; margin-bottom:2px; }
+  .sub { color:var(--dim); font-size:14px; margin-bottom:16px; }
+
+  /* ---------- Tabs ---------- */
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; position:sticky; top:0; z-index:20; background:var(--bg); padding:10px 0; border-bottom:1px solid var(--line); margin-bottom:16px; }
+  .tabbtn { background:transparent; color:var(--dim); border:1px solid transparent; padding:9px 16px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  .tabbtn:hover { color:var(--text); background:var(--card); }
+  .tabbtn.active { background:var(--card); color:var(--text); border-color:var(--line); }
+  .stepnum { display:inline-block; width:20px; height:20px; line-height:20px; text-align:center; border-radius:50%; background:#232b38; color:var(--dim); font-size:12px; margin-right:7px; }
+  .tabbtn.active .stepnum { background:var(--accent); color:#fff; }
+  .tabpane { display:none; }
+  .tabpane.active { display:block; }
+  .nextstep { font-size:13px; color:var(--dim); margin-top:4px; }
+
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+  label { display:block; font-size:12px; color:var(--dim); margin-bottom:4px; text-transform:uppercase; letter-spacing:.05em; }
+  input[type=password], input[type=text], input[type=number], select, textarea { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:#0b0e13; color:var(--text); font-size:14px; }
+  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:220px; }
+  button { cursor:pointer; border:none; border-radius:8px; font-size:15px; font-weight:600; padding:12px 20px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #runBtn { background:var(--accent); color:#fff; width:100%; margin-top:4px; }
+  #runBtn:disabled { background:#31415e; color:#7f8ea8; }
+  .note { font-size:12px; color:var(--dim); margin-top:8px; }
+  .stage { display:flex; align-items:center; gap:12px; padding:10px 4px; border-bottom:1px solid var(--line); }
+  .stage:last-child { border-bottom:none; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#3a4150; flex:none; }
+  .dot.running { background:var(--warn); animation:pulse 1s infinite; }
+  .dot.done { background:var(--ok); }
+  .dot.error { background:var(--err); }
+  @keyframes pulse { 50% { opacity:.35; } }
+  .sname { flex:1; font-size:14px; }
+  .smeta { font-size:12px; color:var(--dim); white-space:nowrap; }
+  details { margin-top:6px; width:100%; }
+  summary { cursor:pointer; font-size:12px; color:var(--dim); }
+  pre { white-space:pre-wrap; word-wrap:break-word; background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px; max-height:320px; overflow:auto; margin-top:8px; }
+  #packPre { max-height:560px; font-size:13px; }
+  .btnrow { display:flex; gap:10px; margin-top:12px; }
+  .btnrow button { background:#232b38; color:var(--text); font-size:13px; padding:9px 16px; }
+  .hidden { display:none; }
+  .totals { font-size:13px; color:var(--dim); margin-top:10px; }
+  .autorun { display:flex; gap:8px; align-items:center; margin-top:14px; font-size:13px; color:var(--dim); }
+  .banner { border-left:3px solid var(--err); background:#231518; color:#ffb9b9; padding:10px 14px; border-radius:6px; font-size:13px; margin-top:12px; }
+  .snote { font-size:11px; color:var(--err); }
+  h2 { font-size:15px; margin-bottom:10px; }
+  h3 { font-size:14px; margin-bottom:8px; }
+
+  /* ---------- Collapsible setup & settings sections ---------- */
+  details.setup { border:1px dashed var(--line); border-radius:8px; padding:10px 12px; margin-bottom:14px; }
+  details.setup summary { font-size:13px; color:var(--dim); font-weight:600; }
+  details.sect { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:10px; background:#12161d; }
+  details.sect summary { font-size:14px; font-weight:600; color:var(--text); }
+  details.sect[open] summary { margin-bottom:10px; }
+
+  /* ---------- Video production ---------- */
+  .vmock { border-left:3px solid var(--warn); background:#26200f; color:#ffe2a1; padding:8px 12px; border-radius:6px; font-size:13px; font-weight:600; margin-bottom:12px; }
+  .vmocktag { background:var(--warn); color:#1a1405; border-radius:4px; padding:0 5px; font-size:10px; font-weight:800; }
+  .vempty { color:var(--dim); font-size:13px; padding:14px 4px; }
+  .vcard { border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:12px; background:#12161d; }
+  .vhead { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+  .vtitle { font-weight:700; font-size:15px; }
+  .vmeta { font-size:12px; color:var(--dim); margin-top:2px; }
+  .vgate { border-left:3px solid var(--err); background:#231518; color:#ffb9b9; padding:8px 12px; border-radius:6px; font-size:13px; margin-top:10px; }
+  .vgate ul { margin:4px 0 0 18px; }
+  .vactions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .vbtn { background:#232b38; color:var(--text); font-size:13px; padding:9px 14px; border-radius:8px; text-decoration:none; display:inline-block; }
+  .vbtn.primary { background:var(--accent); color:#fff; }
+  .vbtn.small { font-size:12px; padding:5px 10px; }
+  .chip { font-size:11px; font-weight:700; border-radius:99px; padding:3px 10px; white-space:nowrap; background:#232b38; color:var(--dim); }
+  .chip-approved, .chip-completed { background:#12301f; color:var(--ok); }
+  .chip-rejected, .chip-generation_failed, .chip-failed { background:#301214; color:var(--err); }
+  .chip-queued_for_video, .chip-generating, .chip-queued, .chip-processing { background:#302a12; color:var(--warn); }
+  .chip-cancelled { background:#232b38; color:var(--dim); }
+  .tscroll { overflow-x:auto; margin-top:8px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top; }
+  th { color:var(--dim); font-weight:600; background:#12161d; }
+  .verr { color:var(--err); font-size:11px; margin-top:4px; }
+  .vgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; margin:10px 0; font-size:13px; }
+  .vlabel { display:block; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .vfield { margin:10px 0; }
+  .vfield label { display:block; font-size:13px; color:var(--text); text-transform:none; letter-spacing:0; margin:4px 0; }
+  .vrefimg { max-width:220px; max-height:160px; border-radius:8px; border:1px solid var(--line); margin:8px 0; display:block; }
+  .vrefimg.small { max-width:140px; max-height:100px; }
+  .vpersona { border:1px solid var(--line); border-radius:10px; padding:12px; background:#12161d; }
+  .vpersona input { margin-bottom:8px; }
+  #vsPersonas { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; margin-top:10px; }
+  dialog { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:12px; padding:20px; max-width:760px; width:92%; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  .vfilters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .vfilters select { width:auto; min-width:130px; }
+  .vrowactions { white-space:nowrap; }
+  .vrowactions .vbtn { margin:1px 2px 1px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ai-InteleKt Content Engine</h1>
+  <div class="sub">Every day: real retail news &rarr; two ready-made scripts &rarr; you approve &rarr; AI video. Nothing is published without your OK.</div>
+
+  <div id="vMockBanner" class="vmock hidden">MOCK VIDEO PROVIDER active — approvals and generations are free simulations; no real video is produced. Pick a real provider in Settings when you're ready.</div>
+
+  <nav class="tabs" aria-label="Main sections">
+    <button class="tabbtn" data-tab="create" onclick="showTab('create')"><span class="stepnum">1</span>Create</button>
+    <button class="tabbtn" data-tab="approve" onclick="showTab('approve')"><span class="stepnum">2</span>Approve</button>
+    <button class="tabbtn" data-tab="videos" onclick="showTab('videos')"><span class="stepnum">3</span>Videos</button>
+    <button class="tabbtn" data-tab="settings" onclick="showTab('settings')">&#9881; Settings</button>
+  </nav>
+
+  <!-- ==================== 1 · CREATE ==================== -->
+  <section class="tabpane" data-tab="create">
+    <div class="card">
+      <h2>Step 1 · Create today's content</h2>
+      <details class="setup" id="setupBox">
+        <summary>Connection setup — <span id="setupHint">checking…</span></summary>
+        <div class="row" style="margin-top:10px">
+          <div>
+            <label for="apiKey">Anthropic API key</label>
+            <input type="password" id="apiKey" placeholder="sk-ant-...">
+          </div>
+          <div style="max-width:260px">
+            <label for="model">Model</label>
+            <select id="model">
+              <option value="claude-opus-4-8">Claude Opus 4.8 (best quality)</option>
+              <option value="claude-sonnet-5">Claude Sonnet 5 (cheaper)</option>
+            </select>
+          </div>
+        </div>
+        <div class="note">Your key is stored only in this browser and sent only to api.anthropic.com through this local server. Get one at console.anthropic.com &rarr; API keys.</div>
+      </details>
+      <button id="runBtn">&#9654; Run today's pipeline</button>
+      <div class="note">A full run takes about <b>8–15 minutes on Opus</b> or <b>4–8 minutes on Sonnet</b> — keep this tab open. Progress shows below.</div>
+      <div class="autorun">
+        <input type="checkbox" id="autoRun">
+        <label for="autoRun" style="display:inline;text-transform:none;letter-spacing:0;font-size:13px">Auto-run every day at 7:00 AM (this page must stay open)</label>
+      </div>
+      <div id="errBanner" class="banner hidden" role="alert"></div>
+    </div>
+
+    <div class="card">
+      <h2>Progress</h2>
+      <div id="stages"></div>
+    </div>
+
+    <div class="card hidden" id="resultCard">
+      <h2>Result — handoff pack (review before anything is published)</h2>
+      <pre id="packPre"></pre>
+      <div class="btnrow">
+        <button id="copyBtn">Copy pack</button>
+        <button id="dlBtn">Download .md</button>
+      </div>
+      <div class="totals" id="totals"></div>
+      <div class="totals" id="savedPath"></div>
+      <div class="nextstep">Next: open the <b>2 · Approve</b> tab to turn a script into a video.</div>
+    </div>
+  </section>
+
+  <!-- ==================== 2 · APPROVE ==================== -->
+  <section class="tabpane" data-tab="approve">
+    <div class="card" id="vProductionCard">
+      <h2>Step 2 · Approve scripts for video</h2>
+      <div class="note" style="margin-top:0;margin-bottom:12px">Pick a content run, read each script, then <b>Approve for Video</b> — or Reject it with a note.</div>
+      <div class="row" style="margin-bottom:12px">
+        <div style="max-width:340px">
+          <label for="vRunSelect">Content run</label>
+          <select id="vRunSelect"></select>
+        </div>
+      </div>
+      <div id="vScripts"><div class="vempty">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- ==================== 3 · VIDEOS ==================== -->
+  <section class="tabpane" data-tab="videos">
+    <div class="card" id="vQueueCard">
+      <h2>Step 3 · Your videos</h2>
+      <div class="note" style="margin-top:0;margin-bottom:12px">Every video you generate shows up here. Use the dropdowns to filter the list.</div>
+      <div class="vfilters">
+        <select id="vfStatus" aria-label="Filter by status"><option value="">All statuses</option><option>queued</option><option>processing</option><option>completed</option><option>failed</option><option>cancelled</option></select>
+        <select id="vfPersona" aria-label="Filter by speaker"><option value="">All speakers</option><option value="Dialogue">Ravi &amp; Rik (podcast)</option><option>Ravi</option><option>Rik</option><option>Product</option></select>
+        <select id="vfPipeline" aria-label="Filter by pipeline"><option value="">All pipelines</option><option value="A">Pipeline A</option><option value="B">Pipeline B</option></select>
+        <select id="vfProvider" aria-label="Filter by provider"><option value="">All providers</option><option>mock</option><option>heygen</option><option>tavus</option></select>
+      </div>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Video</th><th>Speaker</th><th>Pipe</th><th>Provider</th><th>Attempt</th><th>Format</th><th>Status</th><th>Cost</th><th>Actions</th></tr></thead>
+          <tbody id="vQueueBody"><tr><td colspan="9" class="vempty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== SETTINGS ==================== -->
+  <section class="tabpane" data-tab="settings">
+    <div class="card" id="vSettingsCard">
+      <h2>Settings</h2>
+      <div class="totals" id="vsSpend" style="margin-top:0"></div>
+      <div class="totals" id="vsWebhook"></div>
+      <div class="totals" id="vsProviderStatus" style="margin-bottom:14px"></div>
+
+      <details class="sect" open>
+        <summary>Video defaults</summary>
+        <div class="row">
+          <div>
+            <label for="vsProvider">Provider</label>
+            <select id="vsProvider">
+              <option value="mock">Mock Video Provider (free, for testing)</option>
+              <option value="heygen">HeyGen (primary)</option>
+              <option value="tavus">Tavus (fallback)</option>
+            </select>
+          </div>
+          <div>
+            <label for="vsAspect">Default aspect ratio</label>
+            <select id="vsAspect"><option>16:9</option><option>9:16</option><option>1:1</option></select>
+          </div>
+          <div>
+            <label for="vsResolution">Default resolution</label>
+            <select id="vsResolution"><option>1080p</option><option>720p</option></select>
+          </div>
+          <div>
+            <label for="vsExpressiveness">Avatar expressiveness</label>
+            <select id="vsExpressiveness"><option>low</option><option>medium</option><option>high</option></select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="vsCaptions" style="width:auto">
+            <label for="vsCaptions" style="text-transform:none;letter-spacing:0;font-size:13px;margin:0">Burned-in captions by default</label>
+          </div>
+        </div>
+      </details>
+
+      <details class="sect">
+        <summary>Cost controls</summary>
+        <div class="row">
+          <div>
+            <label for="vsWarn">Cost warning threshold ($ per video)</label>
+            <input type="number" id="vsWarn" min="0" step="0.5" placeholder="e.g. 5">
+          </div>
+          <div>
+            <label for="vsLimit">Monthly hard spending limit ($, real providers only)</label>
+            <input type="number" id="vsLimit" min="0" step="1" placeholder="e.g. 100">
+          </div>
+        </div>
+      </details>
+
+      <details class="sect">
+        <summary>Provider API keys (HeyGen / Tavus)</summary>
+        <div class="note" style="margin-top:0">Paste a key and click Save — it is sent once to the local server, written into this computer's <code>.env</code> file, verified against the provider, and never displayed or sent to the browser again.</div>
+        <div class="row" style="margin-top:8px">
+          <div>
+            <label for="vkey-heygen">HeyGen API key</label>
+            <input type="password" id="vkey-heygen" placeholder="paste HeyGen key" autocomplete="off">
+            <div class="btnrow">
+              <button class="vbtn small" id="vkeysave-heygen">Save key</button>
+              <button class="vbtn small" id="vkeyclear-heygen">Clear</button>
+            </div>
+            <div class="totals" id="vkeystatus-heygen" role="status"></div>
+          </div>
+          <div>
+            <label for="vkey-tavus">Tavus API key</label>
+            <input type="password" id="vkey-tavus" placeholder="paste Tavus key" autocomplete="off">
+            <div class="btnrow">
+              <button class="vbtn small" id="vkeysave-tavus">Save key</button>
+              <button class="vbtn small" id="vkeyclear-tavus">Clear</button>
+            </div>
+            <div class="totals" id="vkeystatus-tavus" role="status"></div>
+          </div>
+        </div>
+      </details>
+
+      <details class="sect">
+        <summary>Speakers — reference images &amp; voices</summary>
+        <div class="note" style="margin-top:0">Upload reference images only with the person's permission; providers additionally require their own consent flow for real people. Images are stored locally in data/assets/ and are not committed to source control.</div>
+        <div id="vsPersonas"></div>
+      </details>
+
+      <div class="btnrow"><button class="vbtn primary" id="vsSave">Save settings</button><span id="vsSaved" class="totals" role="status"></span></div>
+    </div>
+  </section>
+</div>
+
+<!-- Review dialog -->
+<dialog id="vReviewDlg" aria-labelledby="vReviewTitle">
+  <h2 id="vReviewTitle">Review &amp; generate video</h2>
+  <div id="vReviewBody"></div>
+  <div class="btnrow">
+    <button class="vbtn primary" id="vGenerateBtn">Generate Video</button>
+    <button class="vbtn" onclick="document.getElementById('vReviewDlg').close()">Close</button>
+  </div>
+</dialog>
+
+<!-- Preview / details dialog -->
+<dialog id="vPreviewDlg" aria-label="Video details">
+  <div id="vPreviewBody"></div>
+  <div class="btnrow"><button class="vbtn" onclick="document.getElementById('vPreviewDlg').close()">Close</button></div>
+</dialog>
+
+<script>
+/* Pipeline UI (unchanged behaviour). All video logic lives in video.js. */
+const $ = (id) => document.getElementById(id);
+let stageKeys = [];
+let polling = null;
+let wasRunning = false;
+
+/* ---------- Tabs ---------- */
+const TABS = ['create', 'approve', 'videos', 'settings'];
+function showTab(name) {
+  if (!TABS.includes(name)) name = 'create';
+  document.querySelectorAll('.tabpane').forEach((p) => p.classList.toggle('active', p.dataset.tab === name));
+  document.querySelectorAll('.tabbtn').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  localStorage.setItem('activeTab', name);
+}
+window.showTab = showTab;
+showTab(localStorage.getItem('activeTab') || 'create');
+
+/* ---------- Setup box (API key + model, collapsed once configured) ---------- */
+function updateSetupHint() {
+  const has = !!$('apiKey').value.trim();
+  $('setupHint').textContent = has ? 'ready ✓ (API key saved)' : 'add your Anthropic API key to start';
+  if (!has) $('setupBox').open = true;
+}
+
+$('apiKey').value = localStorage.getItem('anthropicKey') || '';
+$('apiKey').addEventListener('change', () => { localStorage.setItem('anthropicKey', $('apiKey').value.trim()); updateSetupHint(); });
+$('model').value = localStorage.getItem('engineModel') || 'claude-opus-4-8';
+$('model').addEventListener('change', () => localStorage.setItem('engineModel', $('model').value));
+$('autoRun').checked = localStorage.getItem('autoRunEnabled') === '1';
+$('autoRun').addEventListener('change', () => localStorage.setItem('autoRunEnabled', $('autoRun').checked ? '1' : '0'));
+updateSetupHint();
+
+function showError(msg) { const b = $('errBanner'); b.textContent = msg; b.classList.remove('hidden'); }
+function clearError() { $('errBanner').classList.add('hidden'); }
+
+function buildStageRows(stages) {
+  stageKeys = stages.map((s) => s.key);
+  $('stages').innerHTML = stages.map((s) => `
+    <div class="stage">
+      <span class="dot" id="dot-${s.key}"></span>
+      <div style="flex:1">
+        <div class="sname">${s.name}</div>
+        <div class="snote" id="note-${s.key}"></div>
+        <details id="det-${s.key}" class="hidden"><summary>show output</summary><pre id="out-${s.key}"></pre></details>
+      </div>
+      <span class="smeta" id="meta-${s.key}"></span>
+    </div>`).join('');
+}
+
+function render(st) {
+  if (stageKeys.length !== st.stages.length) buildStageRows(st.stages);
+  for (const s of st.stages) {
+    $('dot-' + s.key).className = 'dot ' + (s.status === 'pending' ? '' : s.status);
+    $('meta-' + s.key).textContent =
+      s.status === 'running' ? s.seconds + 's' :
+      s.status === 'done' ? '✓ ' + s.seconds + 's' + (s.searches ? ` (${s.searches} tool uses)` : '') :
+      s.status === 'error' ? 'failed' : '';
+    $('note-' + s.key).textContent = s.note || '';
+    if (s.output) { $('out-' + s.key).textContent = s.output; $('det-' + s.key).classList.remove('hidden'); }
+  }
+  $('runBtn').disabled = st.running;
+  $('runBtn').textContent = st.running ? 'Running…' : "▶ Run today's pipeline";
+  if (st.error) showError('Pipeline stopped: ' + st.error);
+
+  if (st.pack) {
+    $('packPre').textContent = st.pack;
+    $('resultCard').classList.remove('hidden');
+    if (st.usage) {
+      $('totals').textContent = `Tokens — in: ${st.usage.input.toLocaleString()} · out: ${st.usage.output.toLocaleString()} · cache read: ${st.usage.cache_read.toLocaleString()}. Approx. model cost: $${st.cost.toFixed(2)} (web searches billed separately).`;
+    }
+    $('savedPath').textContent = st.saved ? 'Audit copy saved to: ' + st.saved : '';
+  }
+
+  if (wasRunning && !st.running) {
+    if (st.pack) $('resultCard').scrollIntoView({ behavior: 'smooth' });
+    if (typeof loadRuns === 'function') loadRuns(); // refresh video area with the new run
+  }
+  wasRunning = st.running;
+  if (!st.running && polling) { clearInterval(polling); polling = null; }
+}
+
+async function refresh() {
+  try {
+    const st = await (await fetch('/api/status')).json();
+    render(st);
+    if (st.running && !polling) polling = setInterval(refresh, 2000);
+  } catch { /* server briefly unavailable; next poll retries */ }
+}
+
+async function runPipeline() {
+  const key = $('apiKey').value.trim();
+  if (!key) {
+    showTab('create');
+    $('setupBox').open = true;
+    showError('Paste your Anthropic API key first (get one at console.anthropic.com → API keys).');
+    return;
+  }
+  clearError();
+  $('resultCard').classList.add('hidden');
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ apiKey: key, model: $('model').value }),
+  });
+  const data = await res.json();
+  if (!res.ok) { showError(data.error || 'Could not start the run.'); return; }
+  refresh();
+}
+
+$('runBtn').addEventListener('click', runPipeline);
+$('copyBtn').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('packPre').textContent);
+  $('copyBtn').textContent = 'Copied ✓'; setTimeout(() => ($('copyBtn').textContent = 'Copy pack'), 1500);
+});
+$('dlBtn').addEventListener('click', () => {
+  const blob = new Blob([$('packPre').textContent], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ai-intelekt-pack-' + new Date().toLocaleDateString('en-CA') + '.md';
+  a.click();
+});
+
+/* Auto-run at 7:00 AM local while the page is open */
+setInterval(() => {
+  if (localStorage.getItem('autoRunEnabled') !== '1') return;
+  const now = new Date();
+  const today = now.toLocaleDateString('en-CA');
+  if (now.getHours() === 7 && now.getMinutes() < 10 && localStorage.getItem('lastAutoRunDate') !== today) {
+    localStorage.setItem('lastAutoRunDate', today);
+    runPipeline();
+  }
+}, 30000);
+
+refresh(); // pick up any run already in progress
+</script>
+<script src="/video.js"></script>
+</body>
+</html>

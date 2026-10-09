@@ -1,0 +1,12 @@
+# Secrets — never commit
+.env
+
+# Personal reference images and workflow state — never commit
+data/
+
+# Generated content runs (local audit log)
+runs/
+
+# Python
+__pycache__/
+*.pyc
