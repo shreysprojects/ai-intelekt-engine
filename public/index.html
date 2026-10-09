@@ -33,6 +33,8 @@
   button:disabled { opacity:.45; cursor:not-allowed; }
   #runBtn { background:var(--accent); color:#fff; width:100%; margin-top:4px; }
   #runBtn:disabled { background:#31415e; color:#7f8ea8; }
+  #cancelBtn { background:#3a1d1f; color:#ffb9b9; width:100%; margin-top:8px; }
+  #retryBtn { background:#232b38; color:var(--text); font-size:13px; padding:7px 14px; margin-left:10px; }
   .note { font-size:12px; color:var(--dim); margin-top:8px; }
   .stage { display:flex; align-items:center; gap:12px; padding:10px 4px; border-bottom:1px solid var(--line); }
   .stage:last-child { border-bottom:none; }
@@ -73,6 +75,7 @@
   .vtitle { font-weight:700; font-size:15px; }
   .vmeta { font-size:12px; color:var(--dim); margin-top:2px; }
   .vgate { border-left:3px solid var(--err); background:#231518; color:#ffb9b9; padding:8px 12px; border-radius:6px; font-size:13px; margin-top:10px; }
+  .vflag { color:var(--err); font-size:12px; margin-top:6px; }
   .vgate ul { margin:4px 0 0 18px; }
   .vactions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
   .vbtn { background:#232b38; color:var(--text); font-size:13px; padding:9px 14px; border-radius:8px; text-decoration:none; display:inline-block; }
@@ -141,12 +144,13 @@
         <div class="note">Your key is stored only in this browser and sent only to api.anthropic.com through this local server. Get one at console.anthropic.com &rarr; API keys.</div>
       </details>
       <button id="runBtn">&#9654; Run today's pipeline</button>
+      <button id="cancelBtn" class="hidden">&#10006; Cancel this run</button>
       <div class="note">A full run takes about <b>8–15 minutes on Opus</b> or <b>4–8 minutes on Sonnet</b> — keep this tab open. Progress shows below.</div>
       <div class="autorun">
         <input type="checkbox" id="autoRun">
         <label for="autoRun" style="display:inline;text-transform:none;letter-spacing:0;font-size:13px">Auto-run every day at 7:00 AM (this page must stay open)</label>
       </div>
-      <div id="errBanner" class="banner hidden" role="alert"></div>
+      <div id="errBanner" class="banner hidden" role="alert"><span id="errText"></span><button id="retryBtn">&#8635; Retry run</button></div>
     </div>
 
     <div class="card">
@@ -173,9 +177,12 @@
       <h2>Step 2 · Approve scripts for video</h2>
       <div class="note" style="margin-top:0;margin-bottom:12px">Pick a content run, read each script, then <b>Approve for Video</b> — or Reject it with a note.</div>
       <div class="row" style="margin-bottom:12px">
-        <div style="max-width:340px">
-          <label for="vRunSelect">Content run</label>
-          <select id="vRunSelect"></select>
+        <div style="max-width:420px">
+          <label for="vRunSelect">Content run (date it was made)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="vRunSelect" style="flex:1"></select>
+            <button class="vbtn" id="vRunDelete" title="Delete this content run and all of its videos">&#128465;</button>
+          </div>
         </div>
       </div>
       <div id="vScripts"><div class="vempty">Loading…</div></div>
@@ -341,7 +348,7 @@ $('autoRun').checked = localStorage.getItem('autoRunEnabled') === '1';
 $('autoRun').addEventListener('change', () => localStorage.setItem('autoRunEnabled', $('autoRun').checked ? '1' : '0'));
 updateSetupHint();
 
-function showError(msg) { const b = $('errBanner'); b.textContent = msg; b.classList.remove('hidden'); }
+function showError(msg) { $('errText').textContent = msg; $('errBanner').classList.remove('hidden'); }
 function clearError() { $('errBanner').classList.add('hidden'); }
 
 function buildStageRows(stages) {
@@ -371,6 +378,9 @@ function render(st) {
   }
   $('runBtn').disabled = st.running;
   $('runBtn').textContent = st.running ? 'Running…' : "▶ Run today's pipeline";
+  $('cancelBtn').classList.toggle('hidden', !st.running);
+  $('cancelBtn').disabled = !!st.cancelling;
+  $('cancelBtn').textContent = st.cancelling ? 'Cancelling — stopping at the current agent…' : '✖ Cancel this run';
   if (st.error) showError('Pipeline stopped: ' + st.error);
 
   if (st.pack) {
@@ -419,6 +429,16 @@ async function runPipeline() {
 }
 
 $('runBtn').addEventListener('click', runPipeline);
+$('retryBtn').addEventListener('click', () => { clearError(); runPipeline(); });
+$('cancelBtn').addEventListener('click', async () => {
+  if (!confirm('Cancel this run? Progress so far will be thrown away and nothing is saved.')) return;
+  try {
+    const res = await fetch('/api/run/cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+    if (!res.ok) showError(data.error || 'Could not cancel the run.');
+  } catch { /* status poll will catch up */ }
+  refresh();
+});
 $('copyBtn').addEventListener('click', async () => {
   await navigator.clipboard.writeText($('packPre').textContent);
   $('copyBtn').textContent = 'Copied ✓'; setTimeout(() => ($('copyBtn').textContent = 'Copy pack'), 1500);

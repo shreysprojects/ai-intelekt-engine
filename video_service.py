@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pipeline
-import twoshot
 import video_prep
 from video_providers import ProviderError
 from video_store import VideoStore, new_id, now_iso
@@ -38,8 +38,6 @@ class VideoService:
         self.now = now
         self._poll_lock = threading.Lock()
         self.videos_dir = self.store.path.parent / "videos"
-        self.idle_cache = self.videos_dir / "_idle_cache"
-        self._two_shot_started: set[str] = set()
 
     # ------------------------------------------------------------------
     # Content runs
@@ -91,6 +89,9 @@ class VideoService:
                 "gateProblems": problems,
                 "reviewStatus": (approval or {}).get("status", "awaiting_review"),
                 "approvalId": (approval or {}).get("id"),
+                # red one-liner when this script's scout couldn't find fresh news
+                "freshnessFlag": pipeline.freshness_flag(
+                    stages.get("scoutA" if script_key == "scriptA" else "scoutB") or ""),
             }
         return out
 
@@ -307,7 +308,6 @@ class VideoService:
             "providerJobId": result["providerJobId"],
             "status": result["status"] if result["status"] in ("queued", "processing") else "queued",
             "estimatedCost": result.get("estimatedCost", estimated),
-            "segments": result.get("segments") or None,
         })
         self.store.add_event(job_id, "accepted", result["status"], {"providerJobId": result["providerJobId"]})
         approval["status"] = "queued_for_video"
@@ -386,6 +386,42 @@ class VideoService:
         return {"job": self.store.get_job(job_id)}
 
     # ------------------------------------------------------------------
+    # Deletion (jobs and whole content runs)
+    # ------------------------------------------------------------------
+    def delete_job(self, job_id: str) -> dict:
+        """Permanently remove one video job: its record, events, and any
+        downloaded clips under data/videos/<jobId>. Running work must be
+        cancelled first so a paid generation is never silently abandoned."""
+        job = self.store.get_job(job_id)
+        if not job:
+            return {"errors": ["Job not found."]}
+        if job["status"] in ("queued", "processing"):
+            return {"errors": ["This generation is still running — cancel it first, then delete."]}
+        self.store.delete_job(job_id)
+        shutil.rmtree(self.videos_dir / job_id, ignore_errors=True)
+        self._sync_approval_status(job["approvalId"])
+        return {"ok": True}
+
+    def delete_run(self, run_id: str) -> dict:
+        """Permanently remove a content run: its runs/<id> folder plus every
+        approval, video job, event, and downloaded clip attached to it."""
+        run_dir = (self.runs_dir / run_id).resolve()
+        if not run_id or run_dir.parent != self.runs_dir.resolve() or not run_dir.is_dir():
+            return {"errors": ["Run not found."]}
+        approvals = [a for a in self.store.list_approvals() if a.get("contentRunId") == run_id]
+        jobs = [j for a in approvals for j in self.store.list_jobs(a["id"])]
+        for j in jobs:
+            if j["status"] in ("queued", "processing"):
+                return {"errors": ["A video for this run is still generating — cancel it first, then delete the run."]}
+        for j in jobs:
+            self.store.delete_job(j["id"])
+            shutil.rmtree(self.videos_dir / j["id"], ignore_errors=True)
+        for a in approvals:
+            self.store.delete_approval(a["id"])
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return {"ok": True, "deletedJobs": len(jobs)}
+
+    # ------------------------------------------------------------------
     # Status polling / webhooks
     # ------------------------------------------------------------------
     def poll_active_jobs(self) -> int:
@@ -420,48 +456,11 @@ class VideoService:
             self._sync_approval_status(job["approvalId"])
             return True
         try:
-            if job.get("segments"):
-                result = self._poll_segments(job, provider)
-            else:
-                result = provider.getVideoStatus(job["providerJobId"])
+            result = provider.getVideoStatus(job["providerJobId"])
         except ProviderError as e:
             self.store.add_event(job["id"], "poll_error", e.code, {"message": e.message})
             return False
         return self._apply_result(job, result)
-
-    def _poll_segments(self, job: dict, provider) -> dict:
-        """Aggregate a multi-clip podcast job: completed only when every
-        speaker segment is completed; failed as soon as any segment fails."""
-        segments = job["segments"]
-        for seg in segments:
-            if seg.get("status") in ("completed", "failed", "cancelled"):
-                continue
-            r = provider.getVideoStatus(seg["providerJobId"])
-            seg["status"] = r["status"]
-            seg["videoUrl"] = r.get("videoUrl") or seg.get("videoUrl", "")
-            seg["thumbnailUrl"] = r.get("thumbnailUrl") or seg.get("thumbnailUrl", "")
-            seg["durationSeconds"] = r.get("durationSeconds") or seg.get("durationSeconds")
-            seg["errorMessage"] = r.get("errorMessage", "")
-        self.store.update_job(job["id"], {"segments": segments})
-        statuses = [s.get("status", "queued") for s in segments]
-        if any(s == "failed" for s in statuses):
-            failed = next(s for s in segments if s.get("status") == "failed")
-            return {"providerJobId": job["providerJobId"], "status": "failed",
-                    "videoUrl": "", "thumbnailUrl": "", "durationSeconds": None,
-                    "estimatedCost": None, "actualCost": None,
-                    "errorCode": "segment_failed",
-                    "errorMessage": f"Segment {failed['index'] + 1} ({failed['speaker']}) failed: {failed.get('errorMessage') or 'provider error'}"}
-        if all(s == "completed" for s in statuses):
-            total = sum(s.get("durationSeconds") or 0 for s in segments) or None
-            return {"providerJobId": job["providerJobId"], "status": "completed",
-                    "videoUrl": segments[0].get("videoUrl", ""),
-                    "thumbnailUrl": segments[0].get("thumbnailUrl", ""),
-                    "durationSeconds": total, "estimatedCost": None, "actualCost": None,
-                    "errorCode": "", "errorMessage": ""}
-        status = "processing" if any(s == "processing" for s in statuses) else "queued"
-        return {"providerJobId": job["providerJobId"], "status": status,
-                "videoUrl": "", "thumbnailUrl": "", "durationSeconds": None,
-                "estimatedCost": None, "actualCost": None, "errorCode": "", "errorMessage": ""}
 
     def _apply_result(self, job: dict, result: dict) -> bool:
         status = result["status"]
@@ -488,152 +487,24 @@ class VideoService:
         self.store.add_event(job["id"], "status", status, {
             k: v for k, v in result.items() if k in ("errorCode", "errorMessage", "durationSeconds")})
         self._sync_approval_status(job["approvalId"])
-        if result["status"] == "completed":
-            self._maybe_start_two_shot(job["id"])
         return True
-
-    # ------------------------------------------------------------------
-    # Two-shot ("same room") compositing — automatic after a dialogue job
-    # completes. Runs in a background thread so polling is never blocked.
-    # ------------------------------------------------------------------
-    def _maybe_start_two_shot(self, job_id: str):
-        job = self.store.get_job(job_id)
-        if not job or job.get("isMock"):
-            return
-        if job.get("persona") != "Dialogue" or not job.get("segments"):
-            return
-        existing = job.get("twoShot") or {}
-        if existing.get("status") in ("processing", "ready"):
-            return
-        if job_id in self._two_shot_started:
-            return
-        self._two_shot_started.add(job_id)
-        self.store.update_job(job_id, {"twoShot": {"status": "processing",
-                                                   "startedAt": now_iso()}})
-        self.store.add_event(job_id, "two_shot_started", "", {})
-        threading.Thread(target=self._two_shot_worker, args=(job_id,), daemon=True).start()
-
-    def rebuild_two_shot(self, job_id: str) -> dict:
-        """Re-run the stitch for a completed dialogue job — after retuning
-        twoshot.ALIGN or bumping IDLE_VERSION — reusing the downloaded segment
-        clips (no paid re-generation of the dialogue)."""
-        job = self.store.get_job(job_id)
-        if not job:
-            return {"errors": ["Job not found."]}
-        if job.get("persona") != "Dialogue" or not job.get("segments"):
-            return {"errors": ["Not a dialogue job — nothing to stitch."]}
-        if job.get("status") != "completed":
-            return {"errors": ["The job has not completed; the stitch runs automatically when it does."]}
-        if (job.get("twoShot") or {}).get("status") == "processing" or job_id in self._two_shot_started:
-            return {"errors": ["A stitch for this job is already running."]}
-        self.store.update_job(job_id, {"twoShot": {}})
-        self._maybe_start_two_shot(job_id)
-        return {"ok": True, "job": self.store.get_job(job_id)}
-
-    def _two_shot_worker(self, job_id: str):
-        try:
-            job = self.store.get_job(job_id)
-            segments = job.get("segments") or []
-            turns = sorted(({"index": s["index"], "speaker": s["speaker"]} for s in segments),
-                           key=lambda t: t["index"])
-            sides = twoshot.assign_sides(turns)
-            if len(sides) < 2:
-                raise twoshot.StitchError("a two-shot needs exactly two distinct speakers.")
-
-            req_segs = (job.get("requestSnapshot") or {}).get("segments") or []
-            cfg_by_speaker: dict = {}
-            for rs in req_segs:
-                cfg_by_speaker.setdefault(rs["speaker"], rs)
-
-            out_dir = self.videos_dir / job_id
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            seg_clips = {}
-            for s in segments:
-                if not s.get("videoUrl"):
-                    raise twoshot.StitchError(f"segment {s['index']} ({s['speaker']}) has no video URL.")
-                dest = out_dir / f"seg{s['index']}_{s['speaker']}.mp4"
-                if not dest.exists():
-                    twoshot.download(s["videoUrl"], dest)
-                seg_clips[s["index"]] = dest
-
-            provider = self.providers.get(job["provider"])
-            idle_sources = {spk: self._ensure_idle_loop(spk, cfg_by_speaker.get(spk, {}), job, provider)
-                            for spk in sides}
-
-            out_path = out_dir / "two_shot.mp4"
-            res = twoshot.render(turns, seg_clips, idle_sources, sides, out_path)
-            self.store.update_job(job_id, {"twoShot": {
-                "status": "ready", "path": res["path"],
-                "durationSeconds": res["durationSeconds"],
-                "url": f"/api/video/two-shot/{job_id}",
-                "completedAt": now_iso()}})
-            self.store.add_event(job_id, "two_shot_ready", "",
-                                 {"durationSeconds": res["durationSeconds"]})
-        except Exception as e:  # noqa: BLE001 — surfaced on the job, never crashes the poller
-            self.store.update_job(job_id, {"twoShot": {
-                "status": "failed", "error": str(e), "failedAt": now_iso()}})
-            self.store.add_event(job_id, "two_shot_failed", "", {"message": str(e)})
-        finally:
-            self._two_shot_started.discard(job_id)
-
-    def _ensure_idle_loop(self, speaker: str, cfg: dict, job: dict, provider) -> Path:
-        """A muted 'listening' source clip for one host, cached per avatar+aspect
-        so it is generated once and reused by every later run. The render step
-        turns it into a varied non-repeating track (twoshot.build_humanized_idle),
-        so only the raw clip is cached. Key is versioned: bumping
-        twoshot.IDLE_VERSION regenerates idles when the script/prompt changes."""
-        avatar_key = cfg.get("avatarId") or cfg.get("referenceAssetId") or speaker
-        aspect = job.get("aspectRatio") or "16:9"
-        key = f"{avatar_key}_{aspect.replace(':', 'x')}_v{twoshot.IDLE_VERSION}"
-        self.idle_cache.mkdir(parents=True, exist_ok=True)
-        raw_path = self.idle_cache / f"{key}_raw.mp4"
-        if not raw_path.exists():
-            request = {
-                "voiceId": cfg.get("voiceId"),
-                "spokenScript": twoshot.IDLE_SCRIPT,
-                "resolution": job.get("resolution") or "1080p",
-                "aspectRatio": aspect,
-                "title": f"idle — {speaker}",
-                "jobId": f"{job['id']}-idle-{speaker}",
-                "captions": {"enabled": False},
-                "avatarId": cfg.get("avatarId"),
-                "referenceAssetId": cfg.get("referenceAssetId"),
-                "expressiveness": "low",
-                "motionPrompt": twoshot.IDLE_MOTION_PROMPT,
-            }
-            result = provider.createVideo(request)
-            url = self._await_single(provider, result["providerJobId"])
-            twoshot.download(url, raw_path)
-        return raw_path
-
-    def _await_single(self, provider, provider_job_id: str,
-                      interval: int = 12, max_wait: int = 900) -> str:
-        """Poll one provider clip to completion and return its video URL."""
-        waited = 0
-        while True:
-            r = provider.getVideoStatus(provider_job_id)
-            status = r.get("status")
-            if status == "completed":
-                url = r.get("videoUrl")
-                if not url and hasattr(provider, "refreshOutputUrl"):
-                    url = provider.refreshOutputUrl(provider_job_id).get("videoUrl")
-                if not url:
-                    raise twoshot.StitchError("idle clip completed but returned no video URL.")
-                return url
-            if status == "failed":
-                raise twoshot.StitchError(f"idle clip failed: {r.get('errorMessage', '')}")
-            if waited >= max_wait:
-                raise twoshot.StitchError("idle clip generation timed out.")
-            time.sleep(interval)
-            waited += interval
 
     def _sync_approval_status(self, approval_id: str):
         approval = self.store.get_approval(approval_id)
         if not approval:
             return
+        # A human rejection always wins over job bookkeeping — polling, webhooks
+        # and stale checks must never flip a rejected script back to a
+        # job-derived status. Re-approving is the only way out of "rejected".
+        if approval.get("status") == "rejected":
+            return
         jobs = self.store.list_jobs(approval_id)
         if not jobs:
+            # every attempt was deleted — fall back to the approval itself
+            if approval.get("status") in ("queued_for_video", "generating", "completed",
+                                          "generation_failed", "cancelled"):
+                approval["status"] = "approved"
+                self.store.upsert_approval(approval)
             return
         latest = jobs[-1]
         mapping = {"queued": "queued_for_video", "processing": "generating",

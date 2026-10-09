@@ -87,7 +87,7 @@ NON-NEGOTIABLES (VALIDATION GATE)
 === END FOUNDATION BLOCK ==="""
 
 # ======================= SERVER TOOLS =======================
-WEB_SEARCH = {"type": "web_search_20260209", "name": "web_search", "max_uses": 8}
+WEB_SEARCH = {"type": "web_search_20260209", "name": "web_search", "max_uses": 16}
 WEB_FETCH = {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 4}
 
 # $ per 1M tokens (input, output)
@@ -102,10 +102,14 @@ You are SCOUT A. Surface today's most relevant RETAIL news that connects to one 
 
 Search North American and APAC (India-first, then ASEAN) retail sources from the last 48 hours for: customer retention & churn, loyalty program launches/failures, customer-data unification, omnichannel engagement, personalization, CRM modernization, SMB/MSME tech adoption, enterprise martech missteps.
 
+Search budget: you have up to 16 web searches. Spend them in small batches — run 2-3 queries, read what came back, then refine; keep at least half the budget for follow-ups. Prefer primary, dated news coverage; evergreen "statistics roundup" pages are not news candidates.
+
 For EVERY candidate: source name, title, URL, publication date; one line on why it matters to a mid-market retailer; product fit (CLV | LMP | CEP | Customer360 | CAP); lens (SMB-ADOPTION-GAP or ENTERPRISE-BLIND-SPOT); confidence HIGH only if primary/reputable and dated. Never invent stories, statistics, or URLs. Return 3-5 ranked candidates.
 
+If you could NOT confirm primary news dated within the last 48 hours, explain what went wrong in ONE plain sentence in "freshness_note" (what you found instead and why it fell short); leave it "" when your top candidates are genuinely fresh.
+
 Output JSON only:
-{"pipeline":"A","date":"YYYY-MM-DD","candidates":[{"title":"","source":"","url":"","published":"YYYY-MM-DD","why_it_matters":"","product_fit":"","lens":"","confidence":"HIGH|MEDIUM","key_facts":["fact + figure (with source)"]}]}"""
+{"pipeline":"A","date":"YYYY-MM-DD","freshness_note":"","candidates":[{"title":"","source":"","url":"","published":"YYYY-MM-DD","why_it_matters":"","product_fit":"","lens":"","confidence":"HIGH|MEDIUM","key_facts":["fact + figure (with source)"]}]}"""
 
 PROMPT_SYNOPSIS_A = """You are SYNOPSIS/ROUTER A. Input: the Scout A candidate list below. Pick the ONE strongest story for a product-led post today and route it.
 
@@ -136,10 +140,14 @@ You are SCOUT B. Surface today's HOT retail / commerce / consumer market topics 
 
 Search NA and APAC (India-first, then ASEAN) from the last 48 hours for: major retail moves, consumer-behavior shifts, AI-in-retail, regulation, big-retailer wins/failures, agentic commerce, economic signals affecting retail.
 
+Search budget: you have up to 16 web searches. Spend them in small batches — run 2-3 queries, read what came back, then refine; keep at least half the budget for follow-ups. Prefer primary, dated news coverage; evergreen "statistics roundup" pages are not news candidates.
+
 For EVERY candidate: source, title, URL, publication date; one line on why a CEO or CGO should weigh in; voice fit RAVI (vision/philosophy) or RIK (revenue/GTM/competitive); confidence HIGH only if primary/reputable and dated. Never invent stories, figures, or URLs. Return 3-5 ranked candidates.
 
+If you could NOT confirm primary news dated within the last 48 hours, explain what went wrong in ONE plain sentence in "freshness_note" (what you found instead and why it fell short); leave it "" when your top candidates are genuinely fresh.
+
 Output JSON only:
-{"pipeline":"B","date":"YYYY-MM-DD","candidates":[{"title":"","source":"","url":"","published":"","why_a_leader_weighs_in":"","voice_fit":"RAVI|RIK","confidence":"HIGH|MEDIUM","key_facts":["fact + figure (with source)"]}]}"""
+{"pipeline":"B","date":"YYYY-MM-DD","freshness_note":"","candidates":[{"title":"","source":"","url":"","published":"","why_a_leader_weighs_in":"","voice_fit":"RAVI|RIK","confidence":"HIGH|MEDIUM","key_facts":["fact + figure (with source)"]}]}"""
 
 PROMPT_SYNOPSIS_B = """You are SYNOPSIS/ROUTER B. Input: the Scout B candidates below. Pick the ONE strongest topic for today's executive PODCAST segment - a short filmed conversation between Ravi Srinivasan (CEO) and Rik Chatterjee (CGO).
 
@@ -159,7 +167,7 @@ Obey BOTH voice guides from the Foundation Block exactly - a reader should know 
 
 Structure: OPEN (Rik hooks with the sharpest fact or tension) > EXCHANGE (3-6 alternating turns genuinely working the topic: Rik's commercial read, Ravi's reframe, real back-and-forth) > MOVE (Rik: what a mid-market retailer should actually do) > CLOSE (Ravi lands a principle; no CTA, no product pitch, no "let's talk" sales energy).
 
-Rules: each turn is 1-3 sentences; turns alternate speakers; use ONLY approved_facts for numbers/claims and attribute them naturally in speech (e.g. "a report out this week says..." - never read URLs or full source names aloud); authority-building, never selling; per turn provide on-screen text and a one-line visual direction (two-shot vs single on the speaker).
+Rules: each turn is 1-3 sentences; turns alternate speakers; use ONLY approved_facts for numbers/claims and attribute them naturally in speech (e.g. "a report out this week says..." - never read URLs or full source names aloud); authority-building, never selling; per turn provide on-screen text and a one-line visual direction (the video renders as alternating singles on whichever host is speaking — direct framing/graphics within that).
 
 Output JSON only:
 {"pipeline":"B","format":"podcast_dialogue","voice":"dialogue","title_working":"","runtime_seconds":0,"beats":[{"beat":"OPEN|EXCHANGE|MOVE|CLOSE","speaker":"Rik|Ravi","vo":"","on_screen_text":"","visual_direction":""}],"facts_used":[{"fact":"","source":""}],"source_story_url":""}
@@ -179,7 +187,7 @@ For EACH script produce:
 
 Rules: introduce NO new facts; mark inferred production choices [INFERRED]; POV claims stay framed as opinion; enterprise standard.
 
-Note: SCRIPT OBJECT 2 is a two-host podcast dialogue between Ravi Srinivasan (CEO) and Rik Chatterjee (CGO). Attribute every quote to the correct host, credit both hosts in captions, and write its video brief for an executive podcast set (warm premium interior; two-shot establishing, then alternating singles on whichever host is speaking).
+Note: SCRIPT OBJECT 2 is a two-host podcast dialogue between Ravi Srinivasan (CEO) and Rik Chatterjee (CGO). Attribute every quote to the correct host, credit both hosts in captions, and write its video brief for an executive podcast set (warm premium interior; alternating singles on whichever host is speaking).
 
 Output clean, well-structured MARKDOWN (not JSON), starting with the heading "# ai-InteleKt - Content Handoff Pack - __DATE__".
 
@@ -222,6 +230,57 @@ def extract_json(text: str) -> str:
     return t  # pass raw text forward; downstream model can still read it
 
 
+class PipelineCancelled(Exception):
+    """Raised when the user cancels an in-progress run."""
+
+
+def freshness_flag(scout_text: str) -> str | None:
+    """One-line warning when a scout couldn't surface fresh primary news.
+
+    Prefers the model's own freshness_note (or the ad-hoc _scout_note older
+    runs used); falls back to heuristics — no candidates, nothing published
+    within ~48h of the run date, or no HIGH-confidence pick — so runs from
+    before the freshness_note field existed still get flagged."""
+    if not scout_text:
+        return None
+    try:
+        data = json.loads(extract_json(scout_text))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def one_line(s, limit=200):
+        s = re.sub(r"\s+", " ", str(s)).strip()
+        return (s[: limit - 1].rstrip() + "…") if len(s) > limit else s
+
+    for field in ("freshness_note", "_scout_note"):
+        note = data.get(field)
+        if note and str(note).strip():
+            return one_line(note)
+    cands = data.get("candidates") or []
+    if not cands:
+        return "Scout returned no candidates — nothing usable was found this run."
+    run_date, published = None, []
+    try:
+        run_date = datetime.strptime(str(data.get("date", ""))[:10], "%Y-%m-%d")
+    except ValueError:
+        pass
+    for c in cands:
+        try:
+            published.append(datetime.strptime(str(c.get("published", ""))[:10], "%Y-%m-%d"))
+        except ValueError:
+            continue
+    if run_date and published:
+        newest = max(published)
+        if (run_date - newest).days > 2:
+            return ("Couldn't find news from the last 48 hours — the freshest source "
+                    f"is dated {newest.strftime('%b %d, %Y')}.")
+    if not any(str(c.get("confidence", "")).upper() == "HIGH" for c in cands):
+        return "No HIGH-confidence candidates — sources are stale, secondary, or unverified this run."
+    return None
+
+
 def friendly_error(e: Exception) -> str:
     if isinstance(e, anthropic.AuthenticationError):
         return "API key rejected — check it at console.anthropic.com → API keys."
@@ -237,7 +296,8 @@ def friendly_error(e: Exception) -> str:
     return str(e)
 
 
-def call_stage(client: anthropic.Anthropic, model: str, prompt: str, tools, effort: str | None):
+def call_stage(client: anthropic.Anthropic, model: str, prompt: str, tools, effort: str | None,
+               should_cancel=None):
     """One agent call. Streams (avoids timeouts), resumes pause_turn, totals usage."""
     params: dict = {
         "model": model,
@@ -269,6 +329,8 @@ def call_stage(client: anthropic.Anthropic, model: str, prompt: str, tools, effo
     guard = 0
     messages = params["messages"]
     while msg.stop_reason == "pause_turn" and guard < 8:
+        if should_cancel and should_cancel():
+            raise PipelineCancelled("Run cancelled.")
         guard += 1
         messages = messages + [{"role": "assistant", "content": msg.content}]
         with client.messages.stream(**{**params, "messages": messages}) as s:
@@ -286,11 +348,15 @@ def call_stage(client: anthropic.Anthropic, model: str, prompt: str, tools, effo
     return text, usage, searches, tool_errors
 
 
-def run_pipeline(api_key: str, model: str = "claude-opus-4-8", progress=None) -> dict:
+def run_pipeline(api_key: str, model: str = "claude-opus-4-8", progress=None,
+                 should_cancel=None) -> dict:
     """Run all seven agents in order. Returns pack + totals; saves an audit copy.
 
     progress(event, key, data) is called with events:
       "stage_start" / "stage_done" / "stage_error" — key = stage key
+    should_cancel() is checked before each stage (and between pause_turn
+    resumes); when it returns True the run raises PipelineCancelled and
+    nothing is saved.
     """
     def emit(event, key=None, **data):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {event} {key or ''} {data if data else ''}".strip())
@@ -303,18 +369,25 @@ def run_pipeline(api_key: str, model: str = "claude-opus-4-8", progress=None) ->
     outputs: dict[str, str] = {}
 
     def stage(key, prompt, tools, effort):
+        if should_cancel and should_cancel():
+            raise PipelineCancelled("Run cancelled.")
         emit("stage_start", key)
         t0 = time.time()
         try:
-            text, usage, searches, tool_errors = call_stage(client, model, prompt, tools, effort)
+            text, usage, searches, tool_errors = call_stage(client, model, prompt, tools, effort,
+                                                            should_cancel)
+        except PipelineCancelled:
+            emit("stage_error", key, error="cancelled by you")
+            raise
         except Exception as e:  # noqa: BLE001 — mapped to a friendly message for the UI
             emit("stage_error", key, error=friendly_error(e))
             raise RuntimeError(friendly_error(e)) from e
         for k in totals:
             totals[k] += usage[k]
         outputs[key] = text
+        flag = freshness_flag(text) if key in ("scoutA", "scoutB") else None
         emit("stage_done", key, seconds=round(time.time() - t0), searches=searches,
-             tool_errors=tool_errors, output=text)
+             tool_errors=tool_errors, output=text, flag=flag)
         return text
 
     s1 = stage("scoutA", PROMPT_SCOUT_A.replace("__TODAY__", today), [WEB_SEARCH], "medium")

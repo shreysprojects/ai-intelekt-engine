@@ -65,10 +65,11 @@ def _fresh_stages():
 
 
 STATE = {
-    "running": False, "model": None, "stages": _fresh_stages(),
+    "running": False, "cancelling": False, "model": None, "stages": _fresh_stages(),
     "pack": None, "usage": None, "cost": None, "saved": None, "error": None,
 }
 _stage_started_at: dict[str, float] = {}
+CANCEL_EVENT = threading.Event()
 
 
 def _find(key):
@@ -91,9 +92,13 @@ def _on_progress(event, key, data):
             s["seconds"] = data.get("seconds", 0)
             s["searches"] = data.get("searches", 0)
             s["output"] = data.get("output")
+            notes = []
+            if data.get("flag"):
+                notes.append("⚠ " + data["flag"])
             errs = data.get("tool_errors") or []
             if errs:
-                s["note"] = "tool errors: " + ", ".join(errs)
+                notes.append("tool errors: " + ", ".join(errs))
+            s["note"] = " · ".join(notes)
         elif event == "stage_error":
             s["status"] = "error"
             s["note"] = data.get("error", "failed")
@@ -101,16 +106,21 @@ def _on_progress(event, key, data):
 
 def _run_thread(api_key, model):
     try:
-        result = pipeline.run_pipeline(api_key, model, _on_progress)
+        result = pipeline.run_pipeline(api_key, model, _on_progress,
+                                       should_cancel=CANCEL_EVENT.is_set)
         with _lock:
             STATE.update(pack=result["pack"], usage=result["usage"],
                          cost=result["cost"], saved=result["saved"])
+    except pipeline.PipelineCancelled:
+        with _lock:
+            STATE["error"] = "Run cancelled — nothing was saved. Click Retry to start again."
     except Exception as e:  # noqa: BLE001 — surfaced to the UI
         with _lock:
             STATE["error"] = str(e)
     finally:
         with _lock:
             STATE["running"] = False
+            STATE["cancelling"] = False
 
 
 # ----------------------------------------------------------------------
@@ -221,45 +231,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_file(self, file: Path, mime: str):
-        """Serve a local file with HTTP Range support (needed for <video> seek)."""
-        size = file.stat().st_size
-        rng = self.headers.get("Range", "")
-        start, end = 0, size - 1
-        partial = False
-        if rng.startswith("bytes="):
-            partial = True
-            first, _, last = rng[len("bytes="):].partition("-")
-            try:
-                start = int(first) if first else 0
-                end = int(last) if last else size - 1
-            except ValueError:
-                start, end = 0, size - 1
-            start, end = max(0, start), min(end, size - 1)
-            if start > end:
-                self.send_response(416)
-                self.send_header("Content-Range", f"bytes */{size}")
-                self.end_headers()
-                return None
-        length = end - start + 1
-        self.send_response(206 if partial else 200)
-        self.send_header("Content-Type", mime)
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(length))
-        if partial:
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        self.end_headers()
-        with open(file, "rb") as f:
-            f.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = f.read(min(65536, remaining))
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                remaining -= len(chunk)
-        return None
-
     def _read_body_raw(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_UPLOAD_BYTES * 2:
@@ -325,15 +296,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(content)
                 return None
 
-            if path.startswith("/api/video/two-shot/"):
-                job_id = path.split("/api/video/two-shot/", 1)[1]
-                job = store.get_job(job_id)
-                ts = (job or {}).get("twoShot") or {}
-                fpath = Path(ts.get("path") or "")
-                if not job or ts.get("status") != "ready" or not fpath.is_file():
-                    return self._json(404, {"error": "Two-shot not available for this job."})
-                return self._serve_file(fpath, "video/mp4")
-
             # static files
             rel = "index.html" if path == "/" else path.lstrip("/")
             file = (PUBLIC_DIR / rel).resolve()
@@ -375,6 +337,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/run":
                 return self._start_pipeline(body)
 
+            if path == "/api/run/cancel":
+                with _lock:
+                    if not STATE["running"]:
+                        return self._json(400, {"error": "No run is in progress."})
+                    STATE["cancelling"] = True
+                CANCEL_EVENT.set()
+                return self._json(200, {"ok": True})
+
+            if path == "/api/run/delete":
+                result = video.delete_run(body.get("runId", ""))
+                return self._json(400 if result.get("errors") else 200, result)
+
+            if path == "/api/video/job/delete":
+                result = video.delete_job(body.get("jobId", ""))
+                return self._json(400 if result.get("errors") else 200, result)
+
             if path == "/api/video/approve":
                 result = video.approve(body.get("runId", ""), body.get("scriptKey", ""),
                                        body.get("approvedBy", ""), body.get("overrides") or {})
@@ -387,10 +365,6 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/video/generate":
                 result = video.generate(body.get("approvalId", ""), body)
-                return self._json(400 if result.get("errors") else 200, result)
-
-            if path == "/api/video/two-shot-rebuild":
-                result = video.rebuild_two_shot(body.get("jobId", ""))
                 return self._json(400 if result.get("errors") else 200, result)
 
             if path == "/api/video/cancel":
@@ -426,9 +400,10 @@ class Handler(BaseHTTPRequestHandler):
         with _lock:
             if STATE["running"]:
                 return self._json(409, {"error": "A run is already in progress."})
-            STATE.update(running=True, model=model, stages=_fresh_stages(),
+            STATE.update(running=True, cancelling=False, model=model, stages=_fresh_stages(),
                          pack=None, usage=None, cost=None, saved=None, error=None)
             _stage_started_at.clear()
+        CANCEL_EVENT.clear()
         threading.Thread(target=_run_thread, args=(api_key, model), daemon=True).start()
         return self._json(200, {"started": True})
 

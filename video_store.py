@@ -169,6 +169,13 @@ class VideoStore:
         with self._lock:
             return json.loads(json.dumps(self._data["approvals"]))
 
+    def delete_approval(self, approval_id: str) -> bool:
+        def _apply(data):
+            before = len(data["approvals"])
+            data["approvals"] = [a for a in data["approvals"] if a["id"] != approval_id]
+            return len(data["approvals"]) < before
+        return self.mutate(_apply)
+
     # ---------- jobs ----------
     def add_job(self, job: dict) -> dict:
         def _apply(data):
@@ -208,8 +215,20 @@ class VideoStore:
                 [j for j in self._data["jobs"] if j["status"] in ("queued", "processing")]))
 
     def next_attempt_number(self, approval_id: str) -> int:
+        # max+1, not count+1: attempt numbers must stay unique after deletions
         with self._lock:
-            return 1 + sum(1 for j in self._data["jobs"] if j["approvalId"] == approval_id)
+            return 1 + max((j.get("attemptNumber", 0) for j in self._data["jobs"]
+                            if j["approvalId"] == approval_id), default=0)
+
+    def delete_job(self, job_id: str) -> bool:
+        """Remove a job plus its events and idempotency entries."""
+        def _apply(data):
+            before = len(data["jobs"])
+            data["jobs"] = [j for j in data["jobs"] if j["id"] != job_id]
+            data["events"] = [e for e in data["events"] if e["jobId"] != job_id]
+            data["idempotency"] = {k: v for k, v in data["idempotency"].items() if v != job_id}
+            return len(data["jobs"]) < before
+        return self.mutate(_apply)
 
     # ---------- job events ----------
     def add_event(self, job_id: str, event_type: str, provider_status: str = "", details: dict | None = None):
