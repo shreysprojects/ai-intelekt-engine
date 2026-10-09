@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pipeline
+import twoshot
 import video_prep
 from video_providers import ProviderError
 from video_store import VideoStore, new_id, now_iso
@@ -36,6 +37,9 @@ class VideoService:
         self.runs_dir = Path(runs_dir) if runs_dir else RUNS_DIR
         self.now = now
         self._poll_lock = threading.Lock()
+        self.videos_dir = self.store.path.parent / "videos"
+        self.idle_cache = self.videos_dir / "_idle_cache"
+        self._two_shot_started: set[str] = set()
 
     # ------------------------------------------------------------------
     # Content runs
@@ -484,7 +488,145 @@ class VideoService:
         self.store.add_event(job["id"], "status", status, {
             k: v for k, v in result.items() if k in ("errorCode", "errorMessage", "durationSeconds")})
         self._sync_approval_status(job["approvalId"])
+        if result["status"] == "completed":
+            self._maybe_start_two_shot(job["id"])
         return True
+
+    # ------------------------------------------------------------------
+    # Two-shot ("same room") compositing — automatic after a dialogue job
+    # completes. Runs in a background thread so polling is never blocked.
+    # ------------------------------------------------------------------
+    def _maybe_start_two_shot(self, job_id: str):
+        job = self.store.get_job(job_id)
+        if not job or job.get("isMock"):
+            return
+        if job.get("persona") != "Dialogue" or not job.get("segments"):
+            return
+        existing = job.get("twoShot") or {}
+        if existing.get("status") in ("processing", "ready"):
+            return
+        if job_id in self._two_shot_started:
+            return
+        self._two_shot_started.add(job_id)
+        self.store.update_job(job_id, {"twoShot": {"status": "processing",
+                                                   "startedAt": now_iso()}})
+        self.store.add_event(job_id, "two_shot_started", "", {})
+        threading.Thread(target=self._two_shot_worker, args=(job_id,), daemon=True).start()
+
+    def rebuild_two_shot(self, job_id: str) -> dict:
+        """Re-run the stitch for a completed dialogue job — after retuning
+        twoshot.ALIGN or bumping IDLE_VERSION — reusing the downloaded segment
+        clips (no paid re-generation of the dialogue)."""
+        job = self.store.get_job(job_id)
+        if not job:
+            return {"errors": ["Job not found."]}
+        if job.get("persona") != "Dialogue" or not job.get("segments"):
+            return {"errors": ["Not a dialogue job — nothing to stitch."]}
+        if job.get("status") != "completed":
+            return {"errors": ["The job has not completed; the stitch runs automatically when it does."]}
+        if (job.get("twoShot") or {}).get("status") == "processing" or job_id in self._two_shot_started:
+            return {"errors": ["A stitch for this job is already running."]}
+        self.store.update_job(job_id, {"twoShot": {}})
+        self._maybe_start_two_shot(job_id)
+        return {"ok": True, "job": self.store.get_job(job_id)}
+
+    def _two_shot_worker(self, job_id: str):
+        try:
+            job = self.store.get_job(job_id)
+            segments = job.get("segments") or []
+            turns = sorted(({"index": s["index"], "speaker": s["speaker"]} for s in segments),
+                           key=lambda t: t["index"])
+            sides = twoshot.assign_sides(turns)
+            if len(sides) < 2:
+                raise twoshot.StitchError("a two-shot needs exactly two distinct speakers.")
+
+            req_segs = (job.get("requestSnapshot") or {}).get("segments") or []
+            cfg_by_speaker: dict = {}
+            for rs in req_segs:
+                cfg_by_speaker.setdefault(rs["speaker"], rs)
+
+            out_dir = self.videos_dir / job_id
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            seg_clips = {}
+            for s in segments:
+                if not s.get("videoUrl"):
+                    raise twoshot.StitchError(f"segment {s['index']} ({s['speaker']}) has no video URL.")
+                dest = out_dir / f"seg{s['index']}_{s['speaker']}.mp4"
+                if not dest.exists():
+                    twoshot.download(s["videoUrl"], dest)
+                seg_clips[s["index"]] = dest
+
+            provider = self.providers.get(job["provider"])
+            idle_sources = {spk: self._ensure_idle_loop(spk, cfg_by_speaker.get(spk, {}), job, provider)
+                            for spk in sides}
+
+            out_path = out_dir / "two_shot.mp4"
+            res = twoshot.render(turns, seg_clips, idle_sources, sides, out_path)
+            self.store.update_job(job_id, {"twoShot": {
+                "status": "ready", "path": res["path"],
+                "durationSeconds": res["durationSeconds"],
+                "url": f"/api/video/two-shot/{job_id}",
+                "completedAt": now_iso()}})
+            self.store.add_event(job_id, "two_shot_ready", "",
+                                 {"durationSeconds": res["durationSeconds"]})
+        except Exception as e:  # noqa: BLE001 — surfaced on the job, never crashes the poller
+            self.store.update_job(job_id, {"twoShot": {
+                "status": "failed", "error": str(e), "failedAt": now_iso()}})
+            self.store.add_event(job_id, "two_shot_failed", "", {"message": str(e)})
+        finally:
+            self._two_shot_started.discard(job_id)
+
+    def _ensure_idle_loop(self, speaker: str, cfg: dict, job: dict, provider) -> Path:
+        """A muted 'listening' source clip for one host, cached per avatar+aspect
+        so it is generated once and reused by every later run. The render step
+        turns it into a varied non-repeating track (twoshot.build_humanized_idle),
+        so only the raw clip is cached. Key is versioned: bumping
+        twoshot.IDLE_VERSION regenerates idles when the script/prompt changes."""
+        avatar_key = cfg.get("avatarId") or cfg.get("referenceAssetId") or speaker
+        aspect = job.get("aspectRatio") or "16:9"
+        key = f"{avatar_key}_{aspect.replace(':', 'x')}_v{twoshot.IDLE_VERSION}"
+        self.idle_cache.mkdir(parents=True, exist_ok=True)
+        raw_path = self.idle_cache / f"{key}_raw.mp4"
+        if not raw_path.exists():
+            request = {
+                "voiceId": cfg.get("voiceId"),
+                "spokenScript": twoshot.IDLE_SCRIPT,
+                "resolution": job.get("resolution") or "1080p",
+                "aspectRatio": aspect,
+                "title": f"idle — {speaker}",
+                "jobId": f"{job['id']}-idle-{speaker}",
+                "captions": {"enabled": False},
+                "avatarId": cfg.get("avatarId"),
+                "referenceAssetId": cfg.get("referenceAssetId"),
+                "expressiveness": "low",
+                "motionPrompt": twoshot.IDLE_MOTION_PROMPT,
+            }
+            result = provider.createVideo(request)
+            url = self._await_single(provider, result["providerJobId"])
+            twoshot.download(url, raw_path)
+        return raw_path
+
+    def _await_single(self, provider, provider_job_id: str,
+                      interval: int = 12, max_wait: int = 900) -> str:
+        """Poll one provider clip to completion and return its video URL."""
+        waited = 0
+        while True:
+            r = provider.getVideoStatus(provider_job_id)
+            status = r.get("status")
+            if status == "completed":
+                url = r.get("videoUrl")
+                if not url and hasattr(provider, "refreshOutputUrl"):
+                    url = provider.refreshOutputUrl(provider_job_id).get("videoUrl")
+                if not url:
+                    raise twoshot.StitchError("idle clip completed but returned no video URL.")
+                return url
+            if status == "failed":
+                raise twoshot.StitchError(f"idle clip failed: {r.get('errorMessage', '')}")
+            if waited >= max_wait:
+                raise twoshot.StitchError("idle clip generation timed out.")
+            time.sleep(interval)
+            waited += interval
 
     def _sync_approval_status(self, approval_id: str):
         approval = self.store.get_approval(approval_id)
